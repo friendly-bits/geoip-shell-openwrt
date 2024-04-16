@@ -213,8 +213,6 @@ apply_rules() {
 	retval=0
 
 	insert_failed="$FAIL insert a firewall rule."
-	ipt_comm="-m comment --comment"
-
 	ipsets_to_rm=
 
 	[ ! "$list_ids" ] && [ "$action" != update ] && {
@@ -526,3 +524,4 @@ create_backup() {
 
 ipt_table=mangle
 iface_chain="${geochain}_WAN"
+ipt_comm="-m comment --comment"
