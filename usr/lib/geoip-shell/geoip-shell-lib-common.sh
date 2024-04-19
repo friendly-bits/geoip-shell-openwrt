@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -23,7 +23,7 @@ oldifs() {
 is_root_ok() {
 	[ "$root_ok" ] && return 0
 	rv=1
-	[ "$manualmode" ] && { rv=0; tip=" For usage, run '$me -h'."; }
+	[ "$manmode" ] && { rv=0; tip=" For usage, run '$me -h'."; }
 	die $rv "$me needs to be run as root.$tip"
 }
 

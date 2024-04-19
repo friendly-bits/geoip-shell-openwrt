@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -41,7 +41,12 @@ ipsets="$(get_ipsets)"
 
 printf '\n%s\n\n%s\n' "${purple}$p_name status:${n_c}" "$p_name ${blue}v$curr_ver$n_c"
 
-printf '\n%s\n%s\n' "Geoip blocking mode: ${blue}${geomode}${n_c}" "Ip lists source: ${blue}${geosource}${n_c}"
+case "$_fw_backend" in
+	ipt|nft) _fw="$blue${_fw_backend}ables$n_c" ;;
+	*) _fw="${red}Not set $_X"; incr_issues
+esac
+
+printf '\n%s\n%s\n%s\n' "Firewall backend: $_fw" "Geoip blocking mode: ${blue}${geomode}${n_c}" "Ip lists source: ${blue}${geosource}${n_c}"
 
 check_lists_coherence && lists_coherent=" $_V" || { incr_issues; lists_coherent=" $_Q"; }
 
@@ -102,16 +107,16 @@ report_fw_state
 		*) echo
 			for ccode in $active_ccodes; do
 				el_summary=''
-				printf %s "${blue}${ccode}${n_c}: "
+				printf %s "${purple}${ccode}${n_c}: "
 				for family in $active_families; do
 					el_cnt="$(cnt_ipset_elements "${ccode}_${family}")"
 					[ "$el_cnt" != 0 ] && list_empty='' || { list_empty=" $_X"; incr_issues; }
-					el_summary="$el_summary$family - $el_cnt$list_empty, "
+					el_summary="$el_summary$family - $blue$el_cnt$n_c$list_empty, "
 					total_el_cnt=$((total_el_cnt+el_cnt))
 				done
 				printf '%s\n' "${el_summary%, }"
 			done
-			printf '\n%s\n' "Total number of ip ranges: $total_el_cnt"
+			printf '\n%s\n' "Total number of ip ranges: $blue$total_el_cnt$n_c"
 	esac
 }
 
@@ -132,7 +137,7 @@ if check_cron; then
 	printf '%s\n' "Update cron job: $upd_job_status"
 	[ "$upd_schedule" ] && printf '%s\n' "Update schedule: '${blue}${upd_schedule% }${n_c}'"
 
-	getstatus "$status_file" last_update
+	getstatus "$status_file"
 	[ "$last_update" ] && last_update="$blue$last_update$n_c" || { last_update="${red}Unknown $_X"; incr_issues; }
 	printf '%s\n' "Last successful update: $last_update"
 

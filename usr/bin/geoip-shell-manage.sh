@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -16,8 +16,6 @@ script_dir="$install_dir" &&
 san_args "$@"
 newifs "$delim"
 set -- $_args; oldifs
-
-
 
 usage() {
 
@@ -119,6 +117,9 @@ while getopts ":m:c:f:s:i:l:t:p:r:u:a:o:w:O:zvFdVh" opt; do
 done
 shift $((OPTIND-1))
 
+
+
+
 extra_args "$@"
 
 is_root_ok
@@ -149,15 +150,16 @@ restore_from_config() {
 
 	restore_msg="Restoring $p_name from config... "
 	restore_ok_msg="Successfully restored $p_name from config."
-	[ "$restore_req" ] && {
+	[ "$conf_act" = reset ] && {
 		restore_msg="Applying config... "
 		restore_ok_msg="Successfully applied config."
 	}
 	echolog "$restore_msg"
 	case "$iplists" in
-		'') echolog -err "No ip lists registered in the config file." ;;
+		'') echolog -err "No ip lists registered in the config." ;;
 		*) [ ! "$in_install" ] && [ ! "$first_setup" ] && { rm_iplists_rules || return 1; }
 			setconfig iplists
+			rm_data
 			call_script -l "$run_command" add -l "$iplists" -o
 			check_reapply && {
 				setstatus "$status_file" "last_update=$(date +%h-%d-%Y' '%H:%M:%S)" || die
@@ -175,6 +177,7 @@ restore_from_config() {
 
 check_for_lockout() {
 	[ "$user_ccode" = none ] && return 0
+
 	tip_msg="Make sure you do not lock yourself out."
 	u_ccode="country code '$user_ccode'"
 	inlist="in the planned $geomode"
@@ -223,10 +226,12 @@ get_wrong_ccodes() {
 
 changeact="Changing action to 'configure'."
 
+conf_act=
+
 [ ! -f "$conf_dir/setupdone" ] && {
 	[ "$action" != configure ] && {
 		echolog "Setup has not been completed. $changeact"
-		action=configure restore_req=1
+		action=configure conf_act=reset
 	}
 
 	[ ! "$nointeract_arg" ] && [ -s "$conf_file" ] && {
@@ -251,7 +256,7 @@ changeact="Changing action to 'configure'."
 
 [ "$_fw_backend" ] && { . "$_lib-$_fw_backend.sh" || die; } || {
 	[ "$action" != configure ] && echolog "Firewall backend is not set. $changeact"
-	action=configure restore_req=1
+	action=configure conf_act=reset
 }
 
 [ "$_OWRT_install" ] && { . "$_lib-owrt-common.sh" || die; }
@@ -260,7 +265,7 @@ case "$geomode" in
 	whitelist|blacklist) ;;
 	'') [ "$action" != configure ] && echolog "Geoip mode is not set. $changeact"
 		rm -f "$conf_dir/setupdone" 2>/dev/null
-		action=configure restore_req=1 ;;
+		action=configure conf_act=reset ;;
 	*) die "Unexpected geoip mode '$geomode'!"
 esac
 
@@ -305,7 +310,7 @@ case "$action" in
 		esac
 		call_script "$i_script-apply.sh" $action
 		die $? ;;
-	reset) rm_iplists_rules; setconfig "iplists="; die $? ;;
+	reset) rm_iplists_rules; rm_data; setconfig "iplists="; die $? ;;
 	restore) restore_from_config; die $?
 esac
 
@@ -318,7 +323,7 @@ if [ "$action" = configure ]; then
 		touch "$conf_file" || die "$FAIL create the config file."
 		[ "$_fw_backend" ] && rm_iplists_rules
 	}
-	unset restore_req planned_lists lists_change
+	unset planned_lists lists_change
 	for var_name in datadir nobackup geomode geosource ifaces schedule iplists _fw_backend; do
 		eval "${var_name}_prev=\"\$$var_name\""
 	done
@@ -367,8 +372,10 @@ case "$action" in
 		planned_lists="$lists_req"
 		lists_to_change="$lists_req"
 
-		[ "$geomode_change" ] || [ "$geosource_change" ] || { [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } ||
-			[ "$lists_change" ] || [ "$_fw_backend_change" ] || [ "$nft_perf_change" ] && restore_req=1
+		[ ! "$conf_act" ] && { [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } || [ "$nft_perf_change" ] && conf_act=restore
+		[ "$conf_act" = restore ] && [ "$nobackup_prev" = true ] && conf_act=reset
+
+		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] && conf_act=reset
 
 		[ "$geomode_change" ] || [ "$lists_change" ] || [ "$user_ccode_arg" ] && check_for_lockout
 		iplists="$lists_req"
@@ -380,13 +387,13 @@ case "$action" in
 				rm -rf "$bk_dir" || die "$FAIL remove the backup."
 				OK
 			}
-			[ "$nobackup" = false ] && restore_req=1
+			[ "$nobackup" = false ] && conf_act=reset
 		}
 
-		[ ! "$restore_req" ] && { check_lists_coherence 2>/dev/null || restore_req=1; }
+		[ ! "$conf_act" ] && ! check_lists_coherence 2>/dev/null && conf_act=restore
 
 		[ "$datadir_change" ] && {
-			printf %s "Creating the new data dir '$datadir'... "
+			printf %s "Creating the data dir '$datadir'... "
 			mkdir -p "$datadir" && chmod -R 600 "$datadir" && chown -R root:root "$datadir" || die "$FAIL create '$datadir'."
 			OK
 			[ -d "$datadir_prev" ] && {
@@ -412,28 +419,31 @@ case "$action" in
 			[ "$_fw_backend" ] && {
 				. "$_lib-$_fw_backend.sh" || die
 				rm_iplists_rules
+				rm_data
 			}
 			export _fw_backend="$_fw_be_new"
 			. "$_lib-$_fw_backend.sh" || die
 		}
 
-		if [ ! "$restore_req" ]; then
-			call_script "$i_script-apply.sh" update; rv_apply=$?
-			[ $rv_apply != 0 ] || ! check_lists_coherence && { restore_from_config && rv_apply=254 || rv_apply=1; }
-		else
-			restore_from_config; rv_apply=$?
-		fi
+		case "$conf_act" in
+			reset) restore_from_config; rv_conf=$? ;;
+			restore) call_script -l "$i_script-backup.sh" restore -n; rv_conf=$? ;;
+			'') call_script "$i_script-apply.sh" update; rv_conf=$?
+		esac
 
-		[ "$schedule_change" ] || [ "$restore_req" ] && {
+		[ "$conf_act" != reset ] && { [ "$rv_conf" != 0 ] || ! check_lists_coherence; } &&
+			{ conf_act=reset; restore_from_config; rv_conf=$?; }
+
+		[ "$schedule_change" ] || [ "$conf_act" = reset ]  || [ "$first_setup" ] && {
 			call_script "$i_script-cronsetup.sh" || die "$FAIL update cron jobs."
 		}
 
-		[ "$rv_apply" = 0 ] && [ "$first_setup" ] && {
+		[ "$rv_conf" = 0 ] && [ "$first_setup" ] && {
 			touch "$conf_dir/setupdone"
 			[ "$_OWRTFW" ] && {
 				.  "$_lib-owrt-common.sh" || die
 				rm_lock
-				enable_owrt_init; rv_apply=$?
+				enable_owrt_init; rv_conf=$?
 				[ -f "$lock_file" ] && {
 					echo "Waiting for background processes to complete..."
 					for i in $(seq 1 30); do
@@ -446,7 +456,7 @@ case "$action" in
 		}
 
 		report_lists; statustip
-		die $rv_apply ;;
+		die $rv_conf ;;
 	add)
 		san_str requested_lists "$iplists $lists_req"
 

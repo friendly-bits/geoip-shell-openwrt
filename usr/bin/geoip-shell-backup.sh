@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -16,7 +16,7 @@ oldifs
 usage() {
 cat <<EOF
 
-Usage: $me <action> [-d] [-V] [-h]
+Usage: $me <action> [-n] [-d] [-V] [-h]
 
 Creates a backup of the current firewall state and current ip sets or restores them from backup.
 
@@ -24,6 +24,7 @@ Actions:
   create-backup|restore  : create a backup of, or restore config, geoip ip sets and firewall rules
 
 Options:
+  -n  : Do not restore config and status files
   -d  : Debug
   -V  : Version
   -h  : This help
@@ -37,8 +38,10 @@ case "$action" in
 	* ) unknownact
 esac
 
-while getopts ":dVh" opt; do
+restore_config=1
+while getopts ":ndVh" opt; do
 	case $opt in
+		n) restore_config= ;;
 		d) ;;
 		V) echo "$curr_ver"; exit 0 ;;
 		h) usage; exit 0 ;;
@@ -126,12 +129,13 @@ case "$action" in
 	restore)
 		trap 'rm_rstr_tmp; die' INT TERM HUP QUIT
 		printf '%s\n' "Preparing to restore $p_name from backup..."
-		[ ! -s "$config_file_bak" ] && rstr_failed "'$config_file_bak' is empty or doesn't exist."
-		getconfig iplists iplists "$config_file_bak" &&
-		getconfig bk_ext bk_ext "$config_file_bak" || rstr_failed
+		[ "$restore_conf" ] && bk_conf_file="$config_file_bak" || bk_conf_file="$config_file"
+		[ ! -s "$bk_conf_file" ] && rstr_failed "File '$bk_conf_file' is empty or doesn't exist."
+		getconfig iplists iplists "$bk_conf_file" &&
+		getconfig bk_ext bk_ext "$bk_conf_file" || rstr_failed
 		set_extract_cmd "$bk_ext"
 		restorebackup
-		printf '%s\n\n' "Successfully restored $p_name state from backup."
+		printf '%s\n\n' "Successfully completed action 'restore'."
 esac
 
 die 0

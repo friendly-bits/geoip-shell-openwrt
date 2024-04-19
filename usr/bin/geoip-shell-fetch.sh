@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -387,6 +387,19 @@ check_subnets_cnt_drop() {
 	fi
 }
 
+[ ! "$iplist_dir_f" ] && [ ! "$output_file" ] &&
+	die "Specify iplist directory with '-p <path-to-dir>' or output file with '-o <output_file>'."
+[ "$iplist_dir_f" ] && [ "$output_file" ] && die "Use either '-p <path-to-dir>' or '-o <output_file>' but not both."
+
+[ ! "$lists_arg" ] && die "Specify list id's!"
+fast_el_cnt "$lists_arg" " " lists_arg_cnt
+
+[ "$output_file" ] && [ "$lists_arg_cnt" -gt 1 ] &&
+	die "To fetch multiple lists, use '-p <path-to-dir>' instead of '-o <output_file>'."
+
+[ "$iplist_dir_f" ] && [ ! -d "$iplist_dir_f" ] && die "Directory '$iplist_dir_f' doesn't exist!"
+iplist_dir_f="${iplist_dir_f%/}"
+
 all_registries="ARIN RIPENCC APNIC AFRINIC LACNIC"
 
 newifs "$_nl" cca
@@ -406,7 +419,7 @@ oldifs cca
 ucl_f_cmd="uclient-fetch -T 16"
 curl_cmd="curl -L --retry 5 -f --fail-early --connect-timeout 7"
 
-[ "$script_dir" = "$install_dir" ] && getconfig http
+[ "$script_dir" = "$install_dir" ] && [ "$root_ok" ] && getconfig http
 unset secure_util fetch_cmd
 for util in curl wget uclient-fetch; do
 	checkutil "$util" || continue
@@ -481,19 +494,6 @@ case "$dl_src" in
 	ripe) dl_srv="${ripe_url_api%%/*}" ;;
 	ipdeny) dl_srv="${ipdeny_ipv4_url%%/*}"
 esac
-
-[ ! "$iplist_dir_f" ] && [ ! "$output_file" ] &&
-	die "Specify iplist directory with '-p <path-to-dir>' or output file with '-o <output_file>'."
-[ "$iplist_dir_f" ] && [ "$output_file" ] && die "Use either '-p <path-to-dir>' or '-o <output_file>' but not both."
-
-[ ! "$lists_arg" ] && die "Specify country code/s!"
-fast_el_cnt "$lists_arg" " " lists_arg_cnt
-
-[ "$output_file" ] && [ "$lists_arg_cnt" -gt 1 ] &&
-	die "To fetch multiple lists, use '-p <path-to-dir>' instead of '-o <output_file>'."
-
-[ "$iplist_dir_f" ] && [ ! -d "$iplist_dir_f" ] && die "Directory '$iplist_dir_f' doesn't exist!"
-iplist_dir_f="${iplist_dir_f%/}"
 
 printf '\n%s' "Checking connectivity... "
 nslookup="nslookup -retry=1"

@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -251,7 +251,7 @@ apply_rules() {
 	nft_cmd_chain="$(
 		rv=0
 
-		printf '%s\n%s\n' "add chain inet $geotable $base_geochain { type filter hook prerouting priority mangle; policy accept; }" \
+		printf '%s\n%s\n' "add chain inet $geotable $base_geochain { type filter hook prerouting priority -141; policy accept; }" \
 			"add chain inet $geotable $geochain"
 
 		mk_nft_rm_cmd "$geochain" "$geochain_cont" "${geotag}_whitelist_block" "${geotag_aux}" || exit 1
@@ -376,8 +376,8 @@ restorebackup() {
 	done
 	OK
 
-	cp_conf restore || rstr_failed
-	main_config=
+	[ "$restore_config" ] && { cp_conf restore || rstr_failed; }
+	export main_config=
 
 	rm_all_georules || rstr_failed "$FAIL remove firewall rules."
 

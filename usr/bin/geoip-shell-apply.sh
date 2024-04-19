@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -63,6 +63,8 @@ is_root_ok
 
 get_config_vars
 
+
+
 tolower action
 
 geotag_aux="${geotag}_aux"
@@ -75,6 +77,7 @@ checkvars datadir geomode ifaces _fw_backend noblock
 	subtract_a_from_b "$all_ifaces" "$ifaces" bad_ifaces
 	[ "$bad_ifaces" ] && die "Network interfaces '$bad_ifaces' do not exist in this system."
 }
+
 
 . "$_lib-$_fw_backend.sh" || exit 1
 

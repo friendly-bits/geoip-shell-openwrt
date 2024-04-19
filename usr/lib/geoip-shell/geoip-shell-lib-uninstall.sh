@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -42,7 +42,6 @@ rm_iplists_rules() {
 
 	set +f
 	[ "$iplist_dir" ] && rm -f "${iplist_dir:?}"/*.iplist 2>/dev/null
-	[ "$datadir" ] && rm -rf "${datadir:?}"/* 2>/dev/null
 	set -f
 	:
 }

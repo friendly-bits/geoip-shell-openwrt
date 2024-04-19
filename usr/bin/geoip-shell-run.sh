@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5
+curr_ver=0.5.2
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -100,10 +100,16 @@ trap 'set +f; rm -f \"$iplist_dir/\"*.iplist 2>/dev/null; die' INT TERM HUP QUIT
 [ ! "$manmode" ] && echolog "Starting action '$action_run'."
 
 [ "$daemon_mode" ] && {
-	IFS='. ' read -r uptime _ < /proc/uptime
-	: "${uptime:=0}"
-	: "${reboot_sleep:=30}"
-	sl_time=$((reboot_sleep-uptime))
+	if [ "$action_run" = restore ]; then
+		IFS='. ' read -r uptime _ < /proc/uptime
+		: "${uptime:=0}"
+		: "${reboot_sleep:=30}"
+		sl_time=$((reboot_sleep-uptime))
+	elif [ "$action_run" = update ]; then
+		rand_int="$(tr -cd 0-9 < /dev/urandom | dd bs=1 count=3 2>/dev/null)"
+		: "${rand_int:=0}"
+		sl_time=$((rand_int*300/999))
+	fi
 	[ $sl_time -gt 0 ] && {
 		echolog "Sleeping for ${sl_time}s..."
 		sleep $sl_time
