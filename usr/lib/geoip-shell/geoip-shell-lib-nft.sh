@@ -314,7 +314,7 @@ apply_rules() {
 
 		[ "$geomode" = whitelist ] && [ "$ifaces" != all ] && {
 			printf '%s\n' "insert $georule ip6 saddr fc00::/6 ip6 daddr fc00::/6 udp dport 546 counter accept comment ${geotag_aux}_DHCPv6"
-			printf '%s\n' "insert $georule ip6 saddr fe80::/8 counter accept comment ${geotag_aux}_link-local"
+			printf '%s\n' "insert $georule ip6 saddr fe80::/10 counter accept comment ${geotag_aux}_link-local"
 
 		}
 
