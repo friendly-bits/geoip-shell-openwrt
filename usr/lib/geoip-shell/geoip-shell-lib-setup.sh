@@ -355,18 +355,26 @@ set_defaults() {
 		} 2>/dev/null
 	fi
 
-	nft_perf_def=memory
-	IFS=': ' read -r _ memTotal _ < /proc/meminfo 2>/dev/null
-	case "$memTotal" in
-		''|*![0-9]*) ;;
-		*) [ $memTotal -ge 2097152 ] && nft_perf_def=performance
-	esac
+	[ ! "$nft_perf" ] && {
+		nft_perf_def=memory
+		IFS=': ' read -r _ memTotal _ < /proc/meminfo 2>/dev/null
+		case "$memTotal" in
+			''|*![0-9]*) ;;
+			*) [ $memTotal -ge 2097152 ] && nft_perf_def=performance
+		esac
+	}
 
 	noblock_def=false no_persist_def=false
 
+	[ ! "$schedule" ] && {
+		rand_int="$(tr -cd 0-9 < /dev/urandom | dd bs=1 count=1 2>/dev/null)"
+		: "${rand_int:=0}"
+		def_sch_minute=$((10+rand_int))
+	}
+
 	: "${nobackup:="$nobackup_def"}"
 	: "${datadir:="$datadir_def"}"
-	: "${schedule:="15 4 * * *"}"
+	: "${schedule:="$def_sch_minute 4 * * *"}"
 	: "${families:="ipv4 ipv6"}"
 	: "${geosource:="$geosource_def"}"
 	: "${_fw_backend:="$_fw_backend_def"}"
@@ -529,7 +537,7 @@ ${sp8}Specifies LAN ip's or subnets to exclude from geoip blocking (both ipv4 an
 ${sp8}Only compatible with whitelist mode.
 ${sp8}Generally, in whitelist mode, if the machine has no dedicated WAN interfaces,
 ${sp8}specify LAN ip's or subnets to avoid blocking them. Otherwise you probably don't need this.
-${sp8}'auto' will automatically detect LAN subnets during installation and at every update of the ip lists.
+${sp8}'auto' will automatically detect LAN subnets during the initial setup and at every update of the ip lists.
 ${sp8}'none' removes previously set LAN ip's and disables the automatic detection.
 ${sp8}*Don't use 'auto' if the machine has a dedicated WAN interface*"
 

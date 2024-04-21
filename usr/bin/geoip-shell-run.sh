@@ -92,7 +92,7 @@ failed_lists_cnt=0
 checkvars i_script iplist_dir geomode _fw_backend _lib
 check_deps "$i_script-fetch.sh" "$i_script-apply.sh" "$i_script-backup.sh" "$_lib-$_fw_backend.sh" || die
 
-[ ! -f "$conf_file" ] && die "config file '$conf_file' doesn't exist! Re-install $p_name."
+[ ! -f "$conf_file" ] && die "Config file '$conf_file' doesn't exist! Please run '$p_name configure'."
 
 mk_lock
 trap 'set +f; rm -f \"$iplist_dir/\"*.iplist 2>/dev/null; die' INT TERM HUP QUIT
@@ -106,9 +106,9 @@ trap 'set +f; rm -f \"$iplist_dir/\"*.iplist 2>/dev/null; die' INT TERM HUP QUIT
 		: "${reboot_sleep:=30}"
 		sl_time=$((reboot_sleep-uptime))
 	elif [ "$action_run" = update ]; then
-		rand_int="$(tr -cd 0-9 < /dev/urandom | dd bs=1 count=3 2>/dev/null)"
+		rand_int="$(tr -cd 0-9 < /dev/urandom | dd bs=3 count=1 2>/dev/null)"
 		: "${rand_int:=0}"
-		sl_time=$((rand_int*300/999))
+		sl_time=$(( $(printf "%.0f" "$rand_int")*60/999 ))
 	fi
 	[ $sl_time -gt 0 ] && {
 		echolog "Sleeping for ${sl_time}s..."

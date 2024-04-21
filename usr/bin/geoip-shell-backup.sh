@@ -21,7 +21,7 @@ Usage: $me <action> [-n] [-d] [-V] [-h]
 Creates a backup of the current firewall state and current ip sets or restores them from backup.
 
 Actions:
-  create-backup|restore  : create a backup of, or restore config, geoip ip sets and firewall rules
+  create-backup|restore  : create a backup of, or restore $p_name config, ip sets and firewall rules
 
 Options:
   -n  : Do not restore config and status files

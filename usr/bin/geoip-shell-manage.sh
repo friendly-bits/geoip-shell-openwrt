@@ -269,8 +269,8 @@ case "$geomode" in
 	*) die "Unexpected geoip mode '$geomode'!"
 esac
 
-toupper ccodes_arg
 san_str ccodes_arg
+toupper ccodes_arg
 
 tolower action
 
@@ -315,14 +315,14 @@ case "$action" in
 esac
 
 if [ "$action" = configure ]; then
-	first_setup=
-	[ ! -f "$conf_dir/setupdone" ] && export first_setup=1
-
 	[ ! -s "$conf_file" ] && {
 		rm -f "$conf_dir/setupdone" 2>/dev/null
 		touch "$conf_file" || die "$FAIL create the config file."
 		[ "$_fw_backend" ] && rm_iplists_rules
 	}
+	first_setup=
+	[ ! -f "$conf_dir/setupdone" ] && export first_setup=1
+
 	unset planned_lists lists_change
 	for var_name in datadir nobackup geomode geosource ifaces schedule iplists _fw_backend; do
 		eval "${var_name}_prev=\"\$$var_name\""
@@ -375,16 +375,17 @@ case "$action" in
 		[ ! "$conf_act" ] && { [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } || [ "$nft_perf_change" ] && conf_act=restore
 		[ "$conf_act" = restore ] && [ "$nobackup_prev" = true ] && conf_act=reset
 
-		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] && conf_act=reset
+		bk_dir="$datadir/backup"
+		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] ||
+			[ ! -d "$bk_dir" ] && conf_act=reset
 
 		[ "$geomode_change" ] || [ "$lists_change" ] || [ "$user_ccode_arg" ] && check_for_lockout
 		iplists="$lists_req"
 
-		bk_dir="$datadir/backup"
 		[ "$nobackup_change" ] && {
 			[ -d "$bk_dir" ] && {
 				printf %s "Removing old backup... "
-				rm -rf "$bk_dir" || die "$FAIL remove the backup."
+				rm -rf "$bk_dir" || die "$FAIL remove old backup."
 				OK
 			}
 			[ "$nobackup" = false ] && conf_act=reset
@@ -523,6 +524,7 @@ if [ "$failed_lists" ]; then
 	[ ! "$ok_lists" ] && die "All actions failed."
 fi
 
-[ ! "$in_install" ] && { report_lists; statustip; }
+report_lists
+statustip
 
 die 0

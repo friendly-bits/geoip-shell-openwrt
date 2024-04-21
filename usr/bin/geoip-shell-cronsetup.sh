@@ -209,6 +209,7 @@ create_cron_job() {
 			esac
 
 			rm_cron_job update
+			curr_cron="$(get_curr_cron)" || die "$FAIL read crontab."
 			cron_cmd="$schedule \"$run_cmd\" update -a 1>/dev/null 2>/dev/null # ${p_name}-update"
 			w_sch=" with schedule '$schedule'" ;;
 		persistence)
@@ -233,7 +234,7 @@ rm_cron_job() {
 
 	
 	curr_cron="$(get_curr_cron)" || die "$FAIL read crontab."
-	printf '%s\n' "$curr_cron" | grep -v "${p_name}-${job_type}" | crontab -u root - ||
+	printf '%s\n' "$curr_cron" | grep -v "geoip.*${job_type}" | crontab -u root - ||
 		die "$FAIL remove $job_type cron job."
 }
 
