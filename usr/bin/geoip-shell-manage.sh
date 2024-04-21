@@ -372,14 +372,15 @@ case "$action" in
 		planned_lists="$lists_req"
 		lists_to_change="$lists_req"
 
-		[ ! "$conf_act" ] && { [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } || [ "$nft_perf_change" ] && conf_act=restore
-		[ "$conf_act" = restore ] && [ "$nobackup_prev" = true ] && conf_act=reset
-
 		bk_dir="$datadir/backup"
-		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] ||
-			[ ! -d "$bk_dir" ] && conf_act=reset
 
-		[ "$geomode_change" ] || [ "$lists_change" ] || [ "$user_ccode_arg" ] && check_for_lockout
+		[ ! "$conf_act" ] && { [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } || [ "$nft_perf_change" ] && conf_act=restore
+		[ "$conf_act" = restore ] && { [ "$nobackup_prev" = true ] || [ ! -d "$bk_dir" ]; } && conf_act=reset
+
+		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] ||
+			conf_act=reset
+
+		[ "$geomode_change" ] || [ "$lists_change" ] && check_for_lockout
 		iplists="$lists_req"
 
 		[ "$nobackup_change" ] && {
