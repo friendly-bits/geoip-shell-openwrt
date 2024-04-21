@@ -377,8 +377,7 @@ case "$action" in
 		[ ! "$conf_act" ] && { [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } || [ "$nft_perf_change" ] && conf_act=restore
 		[ "$conf_act" = restore ] && { [ "$nobackup_prev" = true ] || [ ! -d "$bk_dir" ]; } && conf_act=reset
 
-		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] ||
-			conf_act=reset
+		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] && conf_act=reset
 
 		[ "$geomode_change" ] || [ "$lists_change" ] && check_for_lockout
 		iplists="$lists_req"
