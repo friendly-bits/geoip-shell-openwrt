@@ -369,6 +369,7 @@ set_defaults() {
 	[ ! "$schedule" ] && {
 		rand_int="$(tr -cd 0-9 < /dev/urandom | dd bs=1 count=1 2>/dev/null)"
 		: "${rand_int:=0}"
+		[ "$rand_int" = 3 ] && rand_int=4
 		def_sch_minute=$((10+rand_int))
 	}
 
