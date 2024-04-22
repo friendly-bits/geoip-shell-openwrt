@@ -36,8 +36,8 @@ checkutil() {
 }
 
 checkvars() {
-	for var; do
-		eval "[ \"\$$var\" ]" || die "The '\$$var' variable is unset."
+	for chkvar; do
+		eval "[ \"\$$chkvar\" ]" || die "The '\$$chkvar' variable is unset."
 	done
 }
 
@@ -391,7 +391,7 @@ awk_cmp() {
 }
 
 compare_files() {
-	[ -f "$1" ] && [ -f "$2" ] || { echolog -err "compare_conf: file '$1' or '$2' does not exist."; return 2; }
+	[ -f "$1" ] && [ -f "$2" ] || { echolog -err "compare_files: file '$1' or '$2' does not exist."; return 2; }
 	awk_cmp "$1" "$2" && awk_cmp "$2" "$1"
 }
 
@@ -667,7 +667,7 @@ check_cron_compat() {
 		done
 		[ ! "$cron_reboot" ] && [ "$no_persist" != true ] && [ ! "$_OWRTFW" ] &&
 			die "cron-based persistence doesn't work with Busybox cron." \
-			"If you want to install without persistence support, install with option '-n'"
+			"If you want to use $p_name without persistence support, install/configure with option '-n'."
 	fi
 }
 

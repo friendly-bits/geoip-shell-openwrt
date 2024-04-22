@@ -174,7 +174,7 @@ case $issues in
 	*) printf '\n%s\n\n' "${red}Problems detected: $issues.${n_c}"
 esac
 
-[ "$issues" ] && [ -f "$lock_file" ] &&
+[ "$issues" != 0 ] && [ -f "$lock_file" ] &&
 	echo "NOTE: $lock_file lock file indicates that $p_name is doing something in the background. Wait a bit and check again."
 
 return $issues

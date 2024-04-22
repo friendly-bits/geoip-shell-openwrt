@@ -374,7 +374,9 @@ case "$action" in
 
 		bk_dir="$datadir/backup"
 
-		[ ! "$conf_act" ] && { [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } || [ "$nft_perf_change" ] && conf_act=restore
+		[ ! "$conf_act" ] && [ "$nobackup_change" ] && [ "$nobackup" = false ] && conf_act=backup
+		[ "$conf_act" != reset ] &&
+			{ [ "$ifaces_change" ] && [ "$_fw_backend" = nft ]; } || [ "$nft_perf_change" ] && conf_act=restore
 		[ "$conf_act" = restore ] && { [ "$nobackup_prev" = true ] || [ ! -d "$bk_dir" ]; } && conf_act=reset
 
 		[ "$geomode_change" ] || [ "$geosource_change" ] || [ "$lists_change" ] || [ "$_fw_backend_change" ] && conf_act=reset
@@ -388,10 +390,9 @@ case "$action" in
 				rm -rf "$bk_dir" || die "$FAIL remove old backup."
 				OK
 			}
-			[ "$nobackup" = false ] && conf_act=reset
 		}
 
-		[ ! "$conf_act" ] && ! check_lists_coherence 2>/dev/null && conf_act=restore
+		case "$conf_act" in ''|backup) ! check_lists_coherence 2>/dev/null && conf_act=restore; esac
 
 		[ "$datadir_change" ] && {
 			printf %s "Creating the data dir '$datadir'... "
@@ -427,10 +428,12 @@ case "$action" in
 		}
 
 		case "$conf_act" in
-			reset) restore_from_config; rv_conf=$? ;;
-			restore) call_script -l "$i_script-backup.sh" restore -n; rv_conf=$? ;;
-			'') call_script "$i_script-apply.sh" update; rv_conf=$?
+			reset) restore_from_config ;;
+			restore) call_script -l "$i_script-backup.sh" restore -n ;;
+			backup) call_script -l "$i_script-backup.sh" create-backup ;;
+			'') call_script "$i_script-apply.sh" update
 		esac
+		rv_conf=$?
 
 		[ "$conf_act" != reset ] && { [ "$rv_conf" != 0 ] || ! check_lists_coherence; } &&
 			{ conf_act=reset; restore_from_config; rv_conf=$?; }

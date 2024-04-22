@@ -209,7 +209,9 @@ check_updates() {
 
 	time_now="$(date +%s)"
 
-	printf '\n%s\n\n' "Checking for ip list updates on the $dl_src_cap server..."
+	printf '\n%s\n' "Checking for ip list updates on the $dl_src_cap server..."
+	[ "$dl_src" = ipdeny ] && printf '%s\n' "Note: IPDENY server may be unresponsive at round hours."
+	echo
 
 	case "$dl_src" in
 		ipdeny) get_src_dates_ipdeny ;;
