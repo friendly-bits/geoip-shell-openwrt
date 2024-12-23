@@ -1,62 +1,114 @@
 #!/bin/sh
 
-curr_ver=0.5.2
+curr_ver=0.6.7
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
 
 set_ipt_cmds() {
-	case "$family" in ipv4) f='' ;; ipv6) f=6 ;; *) echolog -err "set_ipt_cmds: Unexpected family '$family'."; return 1; esac
-	ipt_cmd="ip${f}tables -t $ipt_table"; ipt_save_cmd="ip${f}tables-save -t $ipt_table"; ipt_restore_cmd="ip${f}tables-restore -n"
+	case "$1" in ipv4) f_ic='' ;; ipv6) f_ic=6 ;; *) echolog -err "set_ipt_cmds: Unexpected family '$1'."; return 1; esac
+	ipt_cmd="ip${f_ic}tables -t $ipt_table"
+	ipt_save="ip${f_ic}tables-save -t $ipt_table"
+	ipt_save_cmd="${ipt_save} | grep -i $geotag"
+	ipt_save_cmd_c="${ipt_save} -c | grep -i $geotag"
+	ipt_restore_cmd="ip${f_ic}tables-restore -n"
+	:
 }
 
-filter_ipt_rules() {
-	grep "$1" | grep -o "$2.* \*/"
+test_read_ipt() {
+	set_ipt_cmds "$1" &&
+	eval "$ipt_save" 1>/dev/null || { echolog -err "$FAIL get $family iptables rules."; return 1; }
+}
+
+ipt_save() {
+	set_ipt_cmds "$1" || return 1
+	case "$2" in
+		'') eval "$ipt_save_cmd" ;;
+		'-c') eval "$ipt_save_cmd_c"
+	esac
+	:
 }
 
 get_ipsets() {
+	ipset list -n | grep "$geotag"
+}
+
+get_ext_ipsets() {
 	ipset list -t
 }
 
 print_ipset_elements() {
-	get_matching_line "$ipsets" "*" "$1" "*" ipset &&
-		ipset list "${1}_$geotag" | sed -n -e /"Members:"/\{:1 -e n\; -e p\; -e b1\; -e \} | tr '\n' ' '
+	get_matching_line "$2" "*" "$1" "*" &&
+		ipset list "${geotag}_${1}" | sed -n -e /"Members:"/\{:1 -e n\; -e p\; -e b1\; -e \} | tr '\n' ' '
 }
 
 cnt_ipset_elements() {
-	printf %s "$ipsets" |
+	printf %s "$2" |
 		sed -n -e /"$1"/\{:1 -e n\;/maxelem/\{s/.*maxelem\ //\; -e s/\ .*//\; -e p\; -e q\; -e \}\;b1 -e \} |
 			grep . || echo 0
 }
 
-rm_ipt_rules() {
-	printf %s "Removing $family iptables rules tagged '$1'... "
-	set_ipt_cmds
+mk_ipt_rm_cmd() {
+	[ "$1" ] || return 0
+	curr_ipt="$1"
+	shift
+	mirc_tags=
+	for mirc_tag in "$@"; do
+		[ ! "$mirc_tag" ] && continue
+		mirc_tags="$mirc_tags$mirc_tag|"
+	done
+	[ "$mirc_tags" ] || { echolog -err "mk_ipt_rm_cmd: no tags provided"; return 1; }
+	printf '%s\n' "$curr_ipt" | grep -E -- "${mirc_tags}mirc_dummy" | sed '{s/^\[.*\]//;s/-A /-D /}' || return 1
+	:
+}
 
-	{ echo "*$ipt_table"; eval "$ipt_save_cmd" | sed -n "/$1/"'s/^-A /-D /p'; echo "COMMIT"; } |
-		eval "$ipt_restore_cmd" ||
-		{ FAIL; echolog -err "rm_ipt_rules: $FAIL remove firewall rules tagged '$1'."; return 1; }
+rm_ipt_rules() {
+	[ "$1" ] || return 0
+	case "$2" in ipv4|ipv6) ;; *) echolog -err "rm_ipt_rules: Unexpected family '$2'."; return 1; esac
+	curr_ipt="$1"
+	family="$2"
+	shift 2
+	set_ipt_cmds "$family" || return 1
+	tags=
+	for tag in "$@"; do
+		[ ! "$tag" ] && continue
+		tags="$tags'$tag', "
+	done
+	[ "$tags" ] || { echolog -err "rm_ipt_rules: no tags provided"; return 1; }
+	printf %s "Removing $family iptables rules tagged ${tags%, }... "
+	{
+		printf '%s\n' "*$ipt_table"
+		mk_ipt_rm_cmd "$curr_ipt" "$@" || return 1
+		printf '%s\n' "COMMIT"
+	} | eval "$ipt_restore_cmd" || { FAIL; echolog -err "rm_ipt_rules: $FAIL remove firewall rules."; return 1; }
 	OK
 }
 
 rm_all_georules() {
+	get_counters
 	for family in ipv4 ipv6; do
-		rm_ipt_rules "${geotag}_enable"
-		ipt_state="$(eval "$ipt_save_cmd")"
-		printf '%s\n' "$ipt_state" | grep "$iface_chain" >/dev/null && {
-			printf %s "Removing $family chain '$iface_chain'... "
-			printf '%s\n%s\n%s\n%s\n' "*$ipt_table" "-F $iface_chain" "-X $iface_chain" "COMMIT" |
-				eval "$ipt_restore_cmd" && OK || { FAIL; return 1; }
-		}
-		printf '%s\n' "$ipt_state" | grep "$geochain" >/dev/null && {
-			printf %s "Removing $family chain '$geochain'... "
-			printf '%s\n%s\n%s\n%s\n' "*$ipt_table" "-F $geochain" "-X $geochain" "COMMIT" | eval "$ipt_restore_cmd" && OK ||
-				{ FAIL; return 1; }
-		}
+		test_read_ipt "$family" || return 1
+		f_short="${family#ipv}"
+		curr_ipt="$(ipt_save "$family" -c)"
+		rm_ipt_rules "$curr_ipt" "$family" "${geotag}_enable"
+		for direction in inbound outbound; do
+			set_dir_vars "$direction"
+			printf '%s\n' "$curr_ipt" | grep "$iface_chain" >/dev/null && {
+				printf_s "Removing $direction $family chain '$iface_chain'... "
+				printf '%s\n%s\n%s\n%s\n' "*$ipt_table" "-F $iface_chain" "-X $iface_chain" "COMMIT" |
+					eval "$ipt_restore_cmd" && OK || { FAIL; return 1; }
+			}
+			printf '%s\n' "$curr_ipt" | grep "$geochain" >/dev/null && {
+				printf_s "Removing $direction $family chain '$geochain'... "
+				printf '%s\n%s\n%s\n%s\n' "*$ipt_table" "-F $geochain" "-X $geochain" "COMMIT" | eval "$ipt_restore_cmd" && OK ||
+					{ FAIL; return 1; }
+			}
+		done
 	done
+
 	rm_ipsets_rv=0
 	unisleep
-	printf %s "Destroying ipsets tagged '$geotag'... "
+	printf_s "Destroying $p_name ipsets... "
 	for ipset in $(ipset list -n | grep "$geotag"); do
 		ipset destroy "$ipset" || rm_ipsets_rv=1
 	done
@@ -65,464 +117,564 @@ rm_all_georules() {
 }
 
 get_fwrules_iplists() {
-	p="$p_name" t="$ipt_target"
-	{ iptables-save -t "$ipt_table"; ip6tables-save -t "$ipt_table"; } |
-		sed -n "/match-set .*$p.* -j $t/{s/.*match-set //;s/_$p.*//;p}" | grep -vE "(lan_ips_|trusted_)"
-}
-
-get_ipset_iplists() {
-	get_ipsets | sed -n /"$geotag"/\{s/_"$geotag"//\;s/^Name:\ //\;p\} | grep -vE "(lan_ips_|trusted_)"
+	case "$1" in
+		inbound) dir_kwrd_ipset=src ;;
+		outbound) dir_kwrd_ipset=dst ;;
+		*) echolog -err "get_fw_rules_iplists: direction not specified"; return 1;
+	esac
+	set_dir_vars "$1"
+	p="$p_name"
+	for family in ipv4 ipv6; do
+		test_read_ipt "$family" || return 1
+	done
+	{ ipt_save ipv4; ipt_save ipv6; } |
+		sed -n "/match-set${blanks}${p}_.*${blanks}${dir_kwrd_ipset}/{s/.*match-set${blanks}${p}_//;s/_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]//;s/${blanks}${dir_kwrd_ipset}.*//;s/_4/_ipv4/;s/_6/_ipv6/;p;}"
 }
 
 critical() {
-	echo "Failed." >&2
+	FAIL
 	echolog -err "Removing geoip rules..."
 	rm_all_georules
-	set +f; rm "$iplist_dir/"*.iplist 2>/dev/null; set -f
+	set +f; rm -f "$iplist_dir/"*.iplist; set -f
 	die "$1"
 }
 
 destroy_tmp_ipsets() {
 	echolog -err "Destroying temporary ipsets..."
-	for tmp_ipset in $(ipset list -n | grep "$p_name" | grep "temp"); do
+	for tmp_ipset in $(ipset list -n | grep "$p_name" | grep "_t$" | tr '\n' ' ') $new_ipsets; do
 		ipset destroy "$tmp_ipset" 1>/dev/null 2>/dev/null
 	done
 }
 
-mk_ipt_rm_cmd() {
-	for tag in "$@"; do
-		printf '%s\n' "$curr_ipt"  | sed -n "/$tag/"'s/^-A /-D /p' || return 1
+encode_rules() {
+	unset sed_inc_counter_1 sed_inc_counter_2
+	sed_colon_rm=g
+
+	if [ "$1" = '-n' ]; then
+		shift
+	else
+		sed_inc_counter_1="/^${blank}*\\[.*\\]/{"
+		sed_inc_counter_2=";}"
+		sed_colon_res="s/Q/:/;"
+	fi
+
+	[ "$1" ] || { echolog -err "encode_rules: family not set"; return 1; }
+	sed -n "${sed_inc_counter_1}s/${blanks}-A${blanks}//;
+		s/$p_name//g;s/${p_name_cap}//g;s/-m set --match-set//;s/--ctstate//;
+		s/${ipt_comm}${blank}${notblank}*//g;s/-m conntrack//g;s/-m multiport//g;s/-m udp//;s/_//g;
+		s~/~W~g;s/-/_/g;s/\./_/g;s/!/X/g;s/:/Q/g;${sed_colon_res}s/,/Y/g;
+		s/${blanks}/Z/g;s/\$/_${1#ipv}/;/^$/d;p${sed_inc_counter_2}"
+}
+
+get_counters_ipt() {
+	for f in $families; do
+		curr_ipt="$(ipt_save "$f" -c)"
+		case "$curr_ipt" in *":$inbound_geochain "*|*":$outbound_geochain "*) ;; *) return 1; esac
+		eval "${f}_ipt"='$curr_ipt'
 	done
+	counter_strings="$(
+		for f in $families; do
+			eval "curr_ipt=\"\$${f}_ipt\""
+			[ "$curr_ipt" ] && printf '%s\n' "$curr_ipt" |
+			encode_rules "$f"
+		done | $awk_cmd -F "]" '$2 ~ /^[a-zA-Z0-9_]+$/ {print $2 "=" $1 "]"}'
+	)"
+	:
 }
 
-add_ipset() {
-	perm_ipset="$1"; tmp_ipset="${1}_temp"; iplist_file="$2"; ipset_type="$3"
-	[ ! -f "$iplist_file" ] && critical "Can not find the iplist file in path: '$iplist_file'."
+load_ipsets() {
+	printf_s "${_nl}Creating new ipsets... "
 
-	ipset destroy "$tmp_ipset" 1>/dev/null 2>/dev/null
+	newifs "$_nl" loi
+	for entry in ${ipsets_to_add%"${_nl}"}; do
+		IFS=' '
+		set -- $entry
+		oldifs loi
 
-	ip_cnt=$(wc -w < "$iplist_file")
+		[ $# -ge 6 ] || { FAIL; echolog -err "load_ipsets: invalid entry '$*'"; return 1; }
 
-	ipset_hs=$((ip_cnt / 2))
-	[ $ipset_hs -lt 1024 ] && ipset_hs=1024
-	
+		case "$2" in
+			ip|net) ;;
+			*) FAIL; echolog -err "load_ipsets: Invalid ipset type '$2' in entry '$*'"; return 1
+		esac
 
-	
-	ipset create "$tmp_ipset" hash:$ipset_type family "$family" hashsize "$ipset_hs" maxelem "$ip_cnt" ||
-		crtical "$FAIL create ipset '$tmp_ipset'."
-	
+		ipset_name="$1" ipset_type="$2" family_li="$3" ipset_maxelem="$4" ipset_hs="$5"
+		shift 5
+		get_ipset_id "$ipset_name" || return 1
+		ipset destroy "$ipset_name" 1>/dev/null 2>/dev/null
 
-	
-	sed "s/^/add \"$tmp_ipset\" /" "$iplist_file" | ipset restore -exist ||
-		critical "$FAIL import the iplist from '$iplist_file' into ipset '$tmp_ipset'."
-	
+		ipset create "$ipset_name" "hash:$ipset_type" family "$family_li" hashsize "$ipset_hs" maxelem "$ipset_maxelem" ||
+			{ FAIL; echolog -err "$FAIL create ipset '$ipset_name'."; return 1; }
+	done
+	OK
 
-	
+	printf %s "Loading ipsets... "
+	IFS="$_nl"
+	for entry in ${ipsets_to_add%"${_nl}"}; do
+		IFS=' '
+		set -- $entry
+		oldifs loi
+		ipset_name="$1"
+		shift 5
+		iplist_file="$*"
+		sed "/^$/d;s/^/add \"$ipset_name\" /" "$iplist_file"
+		rm -f "$iplist_file"
+	done | ipset restore -exist ||
+		{ oldifs loi; FAIL; echolog -err "$FAIL load ipsets."; return 1; }
+	oldifs loi
+	OK
 
-	
-	ipset swap "$tmp_ipset" "$perm_ipset" || critical "$FAIL swap temporary and permanent ipsets."
-	
-	rm "$iplist_file"
+	:
 }
 
-mk_perm_ipset() {
-	perm_ipset="$1"; ipset_type="$2"; tmp_ipset="${perm_ipset}_temp"
-	case "$curr_ipsets" in *"$perm_ipset"* ) ;; *)
-		
-		ipset create "$perm_ipset" hash:$ipset_type family "$family" hashsize 1 maxelem 1 ||
-			die_a "$FAIL create ipset '$perm_ipset'."
-		
+reg_ipset() {
+	case "$5" in *"$1"*) echolog -err "reg_ipset: ipset '$1' already exists."; return 1; esac
+
+	[ -s "$4" ] || {
+		FAIL
+		echolog -err "reg_ipset: iplist file '$4' does not exist or is empty."
+		return 1
+	}
+
+	ip_cnt_ri=$(wc -w < "$4") || {
+		echolog -err "reg_ipset: $FAIL count ip's in file '$4'."
+		return 1
+	}
+	case "$ip_cnt_ri" in ''|0|*[!0-9]*)
+		echolog -err "reg_ipset: unexpected ip count '$ip_cnt_ri' for ipset '$1'."
+		return 1
 	esac
-}
 
-get_curr_ipsets() {
-	curr_ipsets="$(ipset list -n | grep "$p_name")"
+	ipset_hs_ri=$((ip_cnt_ri / 2))
+	[ $ipset_hs_ri -lt 1024 ] && ipset_hs_ri=1024
+
+	new_ipsets="$new_ipsets$1 "
+	ipsets_to_add="${ipsets_to_add}${1} ${2} ${3} ${ip_cnt_ri} ${ipset_hs_ri} ${4}${_nl}"
+	:
 }
 
 rm_ipset() {
-	[ ! "$1" ] && return 0
-	case "$curr_ipsets" in
-		*"$1"* )
-			
-			ipset destroy "$1"; rv=$?
-			case "$rv" in
-				0)  ;;
-				*) 
-			esac
-	esac
+	[ "$1" ] || { echolog -err "rm_ipset: ipset name not specified"; return 1; }
+	case "$2" in *"$1"*) ;; *) return 0; esac
+
+	ipset destroy "$1" || {
+		echolog -err "$FAIL destroy ipset '$1'."
+		return 1
+	}
+	:
 }
 
 report_fw_state() {
-	dashes="$(printf '%158s' ' ' | tr ' ' '-')"
+	direction="$1"
+	set_dir_vars "$direction"
+
+	dashes="$(printf '%155s' ' ' | tr ' ' '-')"
 	for family in $families; do
-		set_ipt_cmds
-		ipt_output="$($ipt_cmd -vL)" || die "$FAIL get $family iptables state."
+		f_short="${family#ipv}"
+		set_ipt_cmds "$family"
 
-		wl_rule="$(printf %s "$ipt_output" | filter_ipt_rules "${p_name}_whitelist_block" "DROP")"
-		ipt_header="$dashes$_nl${blue}$(printf %s "$ipt_output" | grep -m1 "pkts.*destination")${n_c}$_nl$dashes"
+		if ipt_save "$family" | grep "${p_name}_enable_${dir_short}_${f_short}.*${blanks}${geochain%_*}" 1>/dev/null; then
+			chain_status="enabled $_V"
+		else
+			chain_status="disabled $_X"; incr_issues
+		fi
+		printf '%s\n' "  Geoblocking firewall chain ($family): $chain_status"
 
-		case "$(printf %s "$ipt_output" | filter_ipt_rules "${p_name}_enable" "$geochain")" in
-			'') chain_status="disabled $_X"; incr_issues ;;
-			*) chain_status="enabled $_V"
-		esac
-		printf '%s\n' "Geoip firewall chain ($family): $chain_status"
 		[ "$geomode" = whitelist ] && {
-			case "$wl_rule" in
-				'') wl_rule=''; wl_rule_status="$_X"; incr_issues ;;
-				*) wl_rule="$_nl$wl_rule"; wl_rule_status="$_V"
-			esac
-			printf '%s\n' "Whitelist blocking rule ($family): $wl_rule_status"
+			if ipt_save "$family" | grep "${dir_cap}.*${p_name}_whitelist_block.*${blanks}DROP" 1>/dev/null; then
+				wl_rule_status="$_V"
+			else
+				wl_rule_status="$_X"; incr_issues
+			fi
+			printf '%s\n' "  Whitelist blocking rule ($family): $wl_rule_status"
 		}
 
 		if [ "$verb_status" ]; then
-			printf '\n%s\n%s\n' "${purple}Firewall rules in the $geochain chain ($family)${n_c}:" "$ipt_header"
-			printf %s "$ipt_output" | sed -n -e /"^Chain $geochain"/\{n\;:1 -e n\;/^Chain\ /q\;/^$/q\;p\;b1 -e \} |
-				grep . || { printf '%s\n' "${red}None $_X"; incr_issues; }
+			printf '\n%s\n' "  ${purple}Firewall rules in the $geochain chain ($family)${n_c}:"
+			print_rules_table "$direction" "$family" || { printf '%s\n' "${red}None $_X"; incr_issues; }
 			echo
 		fi
 	done
 }
 
+print_rules_table() {
+	set_dir_vars "$1"
+	set_ipt_cmds "$2"
+
+	rules="$(
+		eval "$ipt_save" -c |
+		sed -n "/${geochain}.*geoip-shell/{
+			s/^${blank}*\[/-K /;
+			s/:/ -B /;
+			s/\]//;
+			s/${geochain}${blanks}//;
+			s/${blanks}-A${blanks}/ /;
+			s/^${blank}*//;
+			s/-m set --match-set/-S/;
+			s/-m comment --comment/-c/;
+			s/-m conntrack --ctstate${blanks}${notblank}*RELATED${notblank}*/-e \"conntrack RELATED,ESTABLISHED\"/;
+			s/-p udp/-P udp/;
+			s/-m udp//;
+			s/-p tcp/-P tcp/;
+			s/-m tcp//;
+			s/-m multiport --dports/-p/;
+			s/--dport/-p/;
+			s/${blanks}dst${blanks}/ /;
+			s/${blanks}src${blanks}/ /;
+			p;}"
+	)"
+
+	[ "$rules" ] || return 1
+
+	fmt_str="  %-9s%-11s%-8s%-5s%-20s%-10s%-10s%-20s%-17s%-16s%s\n"
+	printf "%s\n${fmt_str}%s\n" \
+		"  $dashes${blue}" packets bytes target prot dports source dest interfaces ipset comment extra "$n_c  $dashes"
+
+	newifs "$_nl" table
+
+	for rule in $rules; do
+		[ -z "$rule" ] && continue
+		unset pkts bytes target proto dports src dest ifaces ipset comment extra
+		IFS=' '
+		eval "set -- $rule"
+		while getopts ":K:B::e:c:j:s:d:P:p:S:i:o:" opt; do
+			case $opt in
+				K) pkts=$(num2human "$OPTARG") ;;
+				B) bytes=$(num2human "$OPTARG" bytes) ;;
+				j) target="$OPTARG" ;;
+				P) proto="$OPTARG" ;;
+				p) dports="$OPTARG" ;;
+				s) src="$OPTARG" ;;
+				d) dest="$OPTARG" ;;
+				i|o) ifaces="$OPTARG" ;;
+				S) ipset="${OPTARG#"${p_name}_"}" ;;
+				c) comment="${OPTARG#"${p_name}_"}"; comment="${comment#aux_}" ;;
+				e) extra="$OPTARG" ;;
+				*) echo "unknown opt: '$OPTARG'"
+			esac
+		done
+
+		: "${pkts:=---}"
+		: "${bytes:=---}"
+		: "${target:=???}"
+		: "${proto:=all}"
+		: "${dports:=all}"
+		: "${src:=any}"
+		: "${dest:=any}"
+		: "${ifaces:=all}"
+		: "${ipset:=---}"
+		: "${comment:=---}"
+		: "${extra:=}"
+
+		printf "$fmt_str" "$pkts " "$bytes " "$target " "$proto " "$dports " "$src " "$dest " "$ifaces " "$ipset" "$comment " "$extra "
+	done
+	oldifs table
+	:
+}
+
 geoip_on() {
-	[ "$ifaces" != all ] && first_chain="$iface_chain" || first_chain="$geochain"
-	for family in $families; do
-		set_ipt_cmds || die_a
-		enable_rule="$(eval "$ipt_save_cmd" | grep "${geotag}_enable")"
-		[ ! "$enable_rule" ] && {
-			printf %s "Inserting the enable geoip $family rule... "
-			eval "$ipt_cmd" -I PREROUTING -j "$first_chain" $ipt_comm "${geotag}_enable" || critical "$insert_failed"
-			OK
-		} || printf '%s\n' "Geoip is already on for $family."
+	unset curr_ipt curr_ipt_ipv4 curr_ipt_ipv6 first_chain
+	for direction in ${1:-inbound outbound}; do
+		set_dir_vars "$direction"
+		[ "$ifaces" != all ] && first_chain="$iface_chain" || first_chain="$geochain"
+		[ "$geomode" = disable ] && {
+			echo "$direction geoblocking mode is set to 'disable' - skipping."
+			continue
+		}
+		for family in $families; do
+			eval "curr_ipt=\"\${curr_ipt_${family}}\""
+			f_short="${family#ipv}"
+			[ "$curr_ipt" ] || curr_ipt="$(ipt_save "$family")"
+			eval "curr_ipt_$family"='$curr_ipt'
+			case "$curr_ipt" in
+				*"${geotag}_enable_${dir_short}_${f_short}"*) printf '%s\n' "$direction geoblocking is already on for $family." ;;
+				*)
+					set_ipt_cmds "$family" || die_a
+					printf_s "Inserting the $direction $family geoblocking enable rule... "
+					eval "$ipt_cmd" -I "$base_geochain" -j "$first_chain" $ipt_comm "${geotag}_enable_${dir_short}_${f_short}" ||
+						critical "$FAIL insert the $direction $family geoblocking enable firewall rule"
+					OK
+			esac
+		done
 	done
 }
 
 geoip_off() {
-	for family in $families; do
-		set_ipt_cmds || die
-		enable_rule="$(eval "$ipt_save_cmd" | grep "${geotag}_enable")"
-		if [ "$enable_rule" ]; then
-			rm_ipt_rules "${geotag}_enable" || critical
-		else
-			printf '%s\n' "Geoip is already off for $family."
-		fi
+	off_ok=
+	for direction in ${1:-inbound outbound}; do
+		dir_short="${direction%bound}"
+		for family in $families; do
+			curr_ipt="$(ipt_save "$family")" || return 1
+			case "$curr_ipt" in
+				*"${geotag}_enable_${dir_short}"*)
+					rm_ipt_rules "$curr_ipt" "$family" "${geotag}_enable_${dir_short}" || return 1
+					off_ok=1 ;;
+				*) printf '%s\n' "${direction} $family geoblocking is already off."
+			esac
+		done
 	done
+	[ ! "$off_ok" ] && return 2
+	:
 }
 
 apply_rules() {
-
 	retval=0
 
-	insert_failed="$FAIL insert a firewall rule."
-	ipsets_to_rm=
+	new_ipsets=
 
-	[ ! "$list_ids" ] && [ "$action" != update ] && {
-		usage
-		die 254 "Specify iplist id's!"
-	}
-
-	get_curr_ipsets
-
-	for family in $families; do
-		set_ipt_cmds || die_a
-		curr_ipt="$(eval "$ipt_save_cmd")" || die_a "$FAIL read iptables rules."
-
-		t_ipset="trusted_${family}_${geotag}"
-		lan_ipset="lan_ips_${family}_${geotag}"
-		rm_ipt_rules "$t_ipset" >/dev/null
-		rm_ipt_rules "$lan_ipset" >/dev/null
-		unisleep
-		rm_ipset "$t_ipset"
-		rm_ipset "$lan_ipset"
-
-		get_curr_ipsets
-		curr_ipt="$(eval "$ipt_save_cmd")" || die_a "$FAIL read iptables rules."
-
-		ipsets_to_add=
-
-		for list_id in $list_ids; do
-			case "$list_id" in *_*) ;; *) die_a "Invalid iplist id '$list_id'."; esac
-			[ "${list_id#*_}" != "$family" ] && continue
-			perm_ipset="${list_id}_$geotag"
-			if [ "$action" = add ]; then
-				iplist_file="${iplist_dir}/${list_id}.iplist"
-				mk_perm_ipset "$perm_ipset" net
-				ipsets_to_add="$ipsets_to_add$perm_ipset $iplist_file$_nl"
-			elif [ "$action" = remove ]; then
-				ipsets_to_rm="$ipsets_to_rm$perm_ipset "
-			fi
-		done
-
-		eval "trusted=\"\$trusted_$family\""
-		ipset_type=net
-		case "${trusted%%":"*}" in net|ip)
-			ipset_type="${trusted%%":"*}"
-			trusted="${trusted#*":"}"
-		esac
-
-		[ -n "$trusted" ] && {
-			iplist_file="$iplist_dir/$t_ipset.iplist"
-			sp2nl trusted
-			printf '%s\n' "$trusted" > "$iplist_file" || die_a "$FAIL write to file '$iplist_file'"
-			mk_perm_ipset "$t_ipset" "$ipset_type"
-			ipsets_to_add="$ipsets_to_add$ipset_type:$t_ipset $iplist_file$_nl"
-		}
-
-		[ "$geomode" = whitelist ] && {
-			if [ ! "$autodetect" ]; then
-				eval "lan_ips=\"\$lan_ips_$family\""
-				sp2nl lan_ips
-			else
-				a_d_failed=
-				lan_ips="$(call_script "${i_script}-detect-lan.sh" -s -f "$family")" || a_d_failed=1
-				[ ! "$lan_ips" ] || [ "$a_d_failed" ] && { echolog -err "$FAIL detect $family LAN subnets."; exit 1; }
-				lan_ips="net:$lan_ips"
-				nl2sp "lan_ips_$family" "$lan_ips"
-			fi
-
-			ipset_type="${lan_ips%%":"*}"
-			lan_ips="${lan_ips#*":"}"
-			[ -n "$lan_ips" ] && {
-				iplist_file="$iplist_dir/$lan_ipset.iplist"
-				printf '%s\n' "$lan_ips" > "$iplist_file" || die_a "$FAIL write to file '$iplist_file'"
-				mk_perm_ipset "$lan_ipset" "$ipset_type"
-				ipsets_to_add="$ipsets_to_add$ipset_type:$lan_ipset $iplist_file$_nl"
-			}
-		}
-
-		printf %s "Assembling new $family firewall rules... "
-		set_ipt_cmds || die_a
-
-		iptr_cmd_chain="$(
-			rv=0
-
-			printf '%s\n' "*$ipt_table"
-
-			mk_ipt_rm_cmd "${geotag}_enable" "${geotag_aux}" "${geotag}_whitelist_block" "${geotag}_iface_filter" || rv=1
-
-			for list_id in $list_ids; do
-				[ "$family" != "${list_id#*_}" ] && continue
-				list_tag="${list_id}_${geotag}"
-				mk_ipt_rm_cmd "$list_tag" || rv=1
-			done
-
-			case "$curr_ipt" in *":$geochain "*) ;; *) printf '%s\n' ":$geochain -"; esac
-
-			if [ "$ifaces" != all ]; then
-				case "$curr_ipt" in *":$iface_chain "*) ;; *) printf '%s\n' ":$iface_chain -"; esac
-				for _iface in $ifaces; do
-					printf '%s\n' "-i $_iface -I $iface_chain -j $geochain $ipt_comm ${geotag}_iface_filter"
-				done
-			fi
-
-			[ "$trusted" ] &&
-				printf '%s\n' "-I $geochain -m set --match-set trusted_${family}_${geotag} src $ipt_comm trusted_${family}_${geotag_aux} -j ACCEPT"
-
-			[ "$geomode" = whitelist ] && [ "$lan_ips" ] &&
-				printf '%s\n' "-I $geochain -m set --match-set lan_ips_${family}_${geotag} src $ipt_comm lan_ips_${family}_${geotag_aux} -j ACCEPT"
-
-			[ "$geomode" = whitelist ] && [ "$ifaces" != all ] && {
-				if [ "$family" = ipv6 ]; then
-					printf '%s\n' "-I $geochain -s fc00::/6 -d fc00::/6 -p udp -m udp --dport 546 $ipt_comm ${geotag_aux}_DHCPv6 -j ACCEPT"
-					printf '%s\n' "-I $geochain -s fe80::/10 $ipt_comm ${geotag_aux}_link-local -j ACCEPT"
-				fi
-			}
-
-			for proto in tcp udp; do
-				eval "ports_exp=\"\${${proto}_ports%:*}\" ports=\"\${${proto}_ports##*:}\""
-				[ "$ports_exp" = skip ] && continue
-				if [ "$ports_exp" = all ]; then
-					ports_exp=
-				else
-					dport='--dport'
-					case "$ports_exp" in *multiport*) dport='--dports'; esac
-					ports="$(printf %s "$ports" | sed 's/-/:/g')"
-					ports_exp="$(printf %s "$ports_exp" | sed "s/all//;s/multiport/-m multiport/;s/!/! /;s/dport/$dport/") $ports"
-				fi
-				printf '%s\n' "-I $geochain -p $proto $ports_exp -j ACCEPT $ipt_comm ${geotag_aux}_ports"
-			done
-
-			printf '%s\n' "-I $geochain -m conntrack --ctstate RELATED,ESTABLISHED $ipt_comm ${geotag_aux}_rel-est -j ACCEPT"
-
-			[ "$geomode" = whitelist ] && [ "$ifaces" = all ] &&
-				printf '%s\n' "-I $geochain -i lo $ipt_comm ${geotag_aux}-lo -j ACCEPT"
-
-			if [ "$action" = add ]; then
-				for list_id in $list_ids; do
-					[ "$family" != "${list_id#*_}" ] && continue
-					perm_ipset="${list_id}_${geotag}"
-					list_tag="${list_id}_${geotag}"
-					printf '%s\n' "-A $geochain -m set --match-set $perm_ipset src $ipt_comm $list_tag -j $fw_target"
-				done
-			fi
-
-			[ "$geomode" = whitelist ] && printf '%s\n' "-A $geochain $ipt_comm ${geotag}_whitelist_block -j DROP"
-
-			echo "COMMIT"
-			exit "$rv"
-		)" || die_a "$FAIL assemble commands for iptables-restore"
-		OK
-
-		printf %s "Applying new $family firewall rules... "
-		printf '%s\n' "$iptr_cmd_chain" | eval "$ipt_restore_cmd" || critical "$FAIL apply new iptables rules"
-		OK
-
-		[ -n "$ipsets_to_add" ] && {
-			printf %s "Adding $family ipsets... "
-			newifs "$_nl" apply
-			for entry in ${ipsets_to_add%"$_nl"}; do
-				ipset_type=net
-				case "$entry" in "ip:"*|"net:"*) ipset_type="${entry%%":"*}"; entry="${entry#*":"}"; esac
-				add_ipset "${entry%% *}" "${entry#* }" "$ipset_type"
-				ipsets_to_rm="$ipsets_to_rm${entry%% *}_temp "
-			done
-			oldifs apply
-			OK; echo
-		}
+	active_families=
+	for family in ipv4 ipv6; do
+		set_ipt_cmds "$family"
+		test_read_ipt "$family" || die
+		eval "$ipt_save" | grep -m1 -i "$geotag" 1>/dev/null && active_families="$active_families$family "
 	done
 
-	[ -n "$ipsets_to_rm" ] && {
-		printf %s "Removing old ipsets... "
-		get_curr_ipsets
-		unisleep
-		for ipset in $ipsets_to_rm; do
-			rm_ipset "$ipset"
+	for family in $active_families; do
+		set_ipt_cmds "$family" || die
+		curr_ipt="$(ipt_save "$family" -c)"
+
+		printf_s "Removing $family geoblocking firewall rules... "
+		rm_rules="$(
+			printf '%s\n' "*$ipt_table"
+
+			mk_ipt_rm_cmd "$curr_ipt" "${geotag}_enable" || exit 1
+
+			for direction in inbound outbound; do
+				set_dir_vars "$direction"
+
+				for chain in "$iface_chain" "$geochain"; do
+					case "$curr_ipt" in *":$chain "*) printf '%s\n%s\n' "-F $chain" "-X $chain"; esac
+				done
+			done
+			printf '%s\n' COMMIT
+			:
+		)" || die "$FAIL assemble remove commands for iptables-restore."
+
+		ipt_output="$(printf '%s\n' "$rm_rules" | eval "$ipt_restore_cmd -c" 2>&1)" || {
+			echolog -err "$FAIL remove firewall rules"
+			echolog "iptables errors: '$(printf %s "$ipt_output" | head -c 1k | tr '\n' ';')'"
+			die
+		}
+
+		OK
+	done
+
+	curr_ipsets="$(get_ipsets)"
+
+	[ -n "$rm_ipsets" ] && {
+		printf_s "Removing unneded ipsets... "
+		rm_ipsets_rv=0
+		for ipset in $rm_ipsets; do
+			rm_ipset "$ipset" "$curr_ipsets" || rm_ipsets_rv=1
+			subtract_a_from_b "$ipset" "$curr_ipsets" curr_ipsets "$_nl"
 		done
-		[ "$retval" = 0 ] && OK
+		[ "$rm_ipsets_rv" = 0 ] || { FAIL; echo; die; }
+		OK
 		echo
 	}
 
-	case "$noblock" in
-		false) geoip_on ;;
-		true) echolog -warn "Geoip blocking is disabled via config."
-	esac
+	ipsets_to_add=
+	for family in $families; do
+		for ipset in $load_ipsets; do
+			[ ! "$ipset" ] && continue
+			get_ipset_id "$ipset"
+			case "$list_id" in *_*) ;; *) die "Invalid iplist id '$list_id'."; esac
+			[ "${ipset_family}" != "$family" ] && continue
+			iplist_file="${iplist_dir}/${list_id}.iplist"
+			reg_ipset "$ipset" net "$family" "${iplist_file}" "$curr_ipsets" || die
+		done
 
-	[ "$autodetect" ] && setconfig lan_ips_ipv4 lan_ips_ipv6
+		is_whitelist_present && [ "$family" = ipv4 ] && {
+			dhcp_ipset="${geotag}_dhcp_4"
+			dhcp_addr="192.168.0.0/16${_nl}172.16.0.0/12${_nl}10.0.0.0/8"
+			dhcp_iplist_file="${iplist_dir}/${dhcp_ipset}.iplist"
+			printf '%s\n' "$dhcp_addr" > "$dhcp_iplist_file"
+			reg_ipset "$dhcp_ipset" net "$family" "${dhcp_iplist_file}" "$curr_ipsets" || die
+		}
 
-	echo
+		allow_iplist_file_prev=
+		for direction in inbound outbound; do
+			eval "geomode=\"\$${direction}_geomode\""
+			set_allow_ipset_vars "$direction" "$family"
+			[ "$allow_iplist_file" = "$allow_iplist_file_prev" ] || [ "$geomode" = disable ] ||
+				[ ! -s "$allow_iplist_file" ] && continue
+
+			allow_iplist_file_prev="$allow_iplist_file"
+			eval "allow_ipset_type=\"\$allow_ipset_type_${direction}_${family}\""
+			: "${allow_ipset_type:=ip}"
+			reg_ipset "${geotag}_${allow_ipset_name}" "$allow_ipset_type" "$family" "$allow_iplist_file" "$curr_ipsets" || die
+		done
+	done
+
+	[ -n "$ipsets_to_add" ] && {
+		load_ipsets || die_a
+	}
+
+	printf_s "Assembling new firewall rules... "
+
+	for family in $families; do
+		f_short="${family#ipv}"
+		set_ipt_cmds "$family" || die_a
+		iptr_cmds="$(
+			printf '%s\n' "*$ipt_table"
+
+			for direction in inbound outbound; do
+				set_dir_vars "$direction"
+				case "$direction" in
+					inbound) dir_kwrd_ipset=src iface_kwrd='-i' dir_kwrd='-s' ;;
+					outbound) dir_kwrd_ipset=dst iface_kwrd='-o' dir_kwrd='-d'
+				esac
+
+				case "$geomode" in
+					whitelist) fw_target=ACCEPT ;;
+					blacklist) fw_target=DROP ;;
+					disable)
+						continue ;;
+					*) echolog -err "Unknown geoblocking mode '$geomode' for direction '$direction'."; exit 1
+				esac
+				eval "list_ids=\"\$${direction}_list_ids\""
+				[ "$list_ids" ] || { echolog -err "apply_rules: no list_ids for direction '$direction'."; exit 1; }
+
+				printf '%s\n' ":$geochain -"
+
+				if [ "$ifaces" != all ]; then
+					printf '%s\n' ":$iface_chain -"
+					for _iface in $ifaces; do
+						printf '%s\n' "-I $iface_chain $iface_kwrd $_iface -j $geochain $ipt_comm ${geotag}_iface_filter_${f_short}"
+					done
+				fi
+
+				set_allow_ipset_vars "$direction" "$family"
+				eval "[ \"\${allow_ipset_present_${direction}_${family}}\" ]" && {
+					rule="$geochain -m set --match-set ${geotag}_${allow_ipset_name} $dir_kwrd_ipset $ipt_comm ${geotag_aux}_allow_${f_short} -j ACCEPT"
+					get_counter_val "$rule" "$family"
+					printf '%s\n' "$counter_val -I $rule"
+				}
+
+				[ "$geomode" = whitelist ] && {
+					case "$family" in
+						ipv4)
+							dhcp_addr_expr="-p udp -m set --match-set ${geotag}_dhcp_4 $dir_kwrd_ipset"
+							dhcp_dports="67,68" ;;
+						ipv6)
+							dhcp_addr_expr="$dir_kwrd fc00::/6 -p udp"
+							dhcp_dports="546,547"
+					esac
+					rule_DHCP="$geochain $dhcp_addr_expr -m udp -m multiport --dports $dhcp_dports $ipt_comm ${geotag_aux}_DHCP_${f_short} -j ACCEPT"
+					get_counter_val "$rule_DHCP" "$family"
+					printf '%s\n' "$counter_val -I $rule_DHCP"
+				}
+
+				for proto in tcp udp; do
+					eval "ports_exp=\"\${${direction}_${proto}_ports%:*}\" ports=\"\${${direction}_${proto}_ports##*:}\""
+					[ "$ports_exp" = skip ] && continue
+					if [ "$ports_exp" = all ]; then
+						ports_exp=
+					else
+						dport='--dport'
+						case "$ports_exp" in *multiport*) dport='--dports' ;; '') ;; *) proto="$proto -m $proto"; esac
+						ports="$(printf %s "$ports" | sed 's/-/:/g')"
+						ports_exp="$(printf %s "$ports_exp" | sed "s/all//;s/multiport/-m multiport/;s/!/! /;s/dport/$dport/") $ports"
+					fi
+					trimsp ports_exp
+					[ "$ports_exp" ] && ports_exp=" $ports_exp"
+					rule="$geochain -p $proto$ports_exp $ipt_comm ${geotag_aux}_ports_${f_short} -j ACCEPT"
+					get_counter_val "$rule" "$family"
+					printf '%s\n' "$counter_val -I $rule"
+				done
+
+				rule="$geochain -m conntrack --ctstate RELATED,ESTABLISHED $ipt_comm ${geotag_aux}_rel-est_${f_short} -j ACCEPT"
+				get_counter_val "$rule" "$family"
+				printf '%s\n' "$counter_val -I $rule"
+
+				[ "$geomode" = whitelist ] && [ "$ifaces" = all ] &&
+					printf '%s\n' "[0:0] -I $geochain $iface_kwrd lo $ipt_comm ${geotag_aux}_lo_${f_short} -j ACCEPT"
+
+				for list_id in $list_ids; do
+					[ "$family" != "${list_id#*_}" ] && continue
+					get_ipset_name ipset "$list_id" || exit 1
+					list_tag="${geotag}_${list_id}"
+					rule="$geochain -m set --match-set $ipset $dir_kwrd_ipset $ipt_comm $list_tag -j $fw_target"
+					get_counter_val "$rule" "$family"
+					printf '%s\n' "$counter_val -A $rule"
+				done
+
+				[ "$geomode" = whitelist ] && {
+					rule="$geochain $ipt_comm ${geotag}_whitelist_block -j DROP"
+					get_counter_val "$rule" "$family"
+					printf '%s\n' "$counter_val -A $rule"
+				}
+			done
+			echo COMMIT
+			:
+		)" || die_a "$FAIL assemble commands for iptables-restore"
+		eval "${family}_iptr_cmds=\"$iptr_cmds\""
+	done
+
+	OK
+
+	for family in $families; do
+		set_ipt_cmds "$family" || die_a
+		eval "iptr_cmds=\"\${${family}_iptr_cmds}\""
+		printf_s "Applying new $family firewall rules... "
+		ipt_output="$(printf '%s\n' "$iptr_cmds" | eval "$ipt_restore_cmd -c" 2>&1)" || {
+			echolog -err "$FAIL apply new $family iptables rules"
+			echolog "iptables errors: '$(printf %s "$ipt_output" | head -c 1k | tr '\n' ';')'"
+			critical
+		}
+		printf '%s\n' "$iptr_cmds" | eval "$ipt_restore_cmd -c" || critical "$FAIL apply new $family iptables rules"
+		OK
+	done
+
+	[ "$noblock" = false ] && geoip_on
 
 	return "$retval"
 }
 
-restorebackup() {
-	get_iptables_bk() {
-		sed -n -e /"\[${p_name}_IPTABLES_$family\]"/\{:1 -e n\;/\\["${p_name}_IP"/q\;p\;b1 -e \} < "$tmp_file"
-	}
-	get_ipset_bk() { sed -n "/create .*${p_name}/,\$p" < "$tmp_file"; }
-
-	printf '%s\n' "Restoring firewall state from backup... "
+extract_iplists() {
+	printf '%s\n' "Restoring $p_name ip lists from backup... "
 
 	bk_file="${bk_dir}/${p_name}_backup.${bk_ext:-bak}"
-	[ -z "$bk_file" ] && die "Can not restore the firewall state: no backup found."
-	[ ! -f "$bk_file" ] && die "Can not find the backup file '$bk_file'."
+	[ "$bk_file" ] || die "Backup file path is not set in config."
+	[ -f "$bk_file" ] || die "Can not find the backup file '$bk_file'."
 
 	tmp_file="/tmp/${p_name}_backup.tmp"
-	$extract_cmd "$bk_file" > "$tmp_file" || rstr_failed "$FAIL extract backup file '$bk_file'."
-	[ ! -s "$tmp_file" ] && rstr_failed "backup file '$bk_file' is empty or backup extraction failed."
+	$extract_cmd "$bk_file" > "$tmp_file" && [ -s "$tmp_file" ] ||
+		rstr_failed "Backup file '$bk_file' is empty or backup extraction failed."
+
+	grep -m1 "add .*$p_name" "$tmp_file" 1>/dev/null || rstr_failed "ip lists backup appears to be empty or non-existing."
 
 	printf '%s\n\n' "Successfully read backup file: '$bk_file'."
-
-	printf %s "Checking the iptables portion of the backup file... "
-
-	for family in $families; do
-		line_cnt=$(get_iptables_bk | wc -l)
-		
-		[ "$line_cnt" -lt 2 ] && rstr_failed "firewall $family backup appears to be empty or non-existing."
-	done
-	OK
-
-	printf %s "Checking the ipset portion of the backup file... "
-	get_ipset_bk | grep "add .*$p_name" 1>/dev/null || rstr_failed "ipset backup appears to be empty or non-existing."
-	OK
-
-	rm_all_georules || rstr_failed "$FAIL remove firewall rules and ipsets."
-
-	for restoretgt in ipset iptables; do
-		printf %s "Restoring $restoretgt state... "
-		case "$restoretgt" in
-			ipset) get_ipset_bk | ipset restore; rv=$? ;;
-			iptables)
-				rv=0
-				for family in $families; do
-					set_ipt_cmds
-					get_iptables_bk | $ipt_restore_cmd; rv=$((rv+$?))
-				done ;;
-		esac
-
-		case "$rv" in
-			0) OK ;;
-			*) FAIL; rstr_failed "$FAIL restore $restoretgt state from backup." reset
-		esac
-	done
-
-	rm_rstr_tmp
-
-	[ "$restore_config" ] && { cp_conf restore || rstr_failed; }
-	export main_config=
 	:
 }
 
-rm_rstr_tmp() {
-	rm -f "$tmp_file" 2>/dev/null
-}
-
-rstr_failed() {
+restore_ipsets() {
+	printf_s "Restoring $p_name ipsets... "
+	ipset restore < "$tmp_file"; rv=$?
 	rm_rstr_tmp
-	main_config=
-	[ "$1" ] && echolog -err "$1"
-	[ "$2" = reset ] && {
-		echolog -err "*** Geoip blocking is not working. Removing geoip firewall rules. ***"
-		rm_all_georules
-	}
-	die
-}
 
-rm_bk_tmp() {
-	rm -f "$tmp_file" "${bk_file}.new" 2>/dev/null
-}
-
-bk_failed() {
-	rm_bk_tmp
-	die "$1"
+	case "$rv" in
+		0) OK ;;
+		*) FAIL; return 1
+	esac
+	:
 }
 
 create_backup() {
-	printf %s "Creating backup of current $p_name state... "
-
-	bk_len=0
-	for family in $families; do
-		set_ipt_cmds
-		printf '%s\n' "[${p_name}_IPTABLES_$family]" >> "$tmp_file" &&
-		printf '%s\n' "*$ipt_table" >> "$tmp_file" &&
-		$ipt_save_cmd | grep -i "$geotag" >> "$tmp_file" &&
-		printf '%s\n' "COMMIT" >> "$tmp_file" || bk_failed "$FAIL back up $p_name state."
-	done
-	OK
-
-	bk_len="$(wc -l < "$tmp_file")"
-	printf '%s\n' "[${p_name}_IPSET]" >> "$tmp_file"
-
-	for ipset in $(ipset list -n | grep $geotag); do
-		printf %s "Creating backup of ipset '$ipset'... "
-
-		ipset save "$ipset" >> "$tmp_file"; rv=$?
-
-		bk_len_old=$(( bk_len + 1 ))
-		bk_len="$(wc -l < "$tmp_file")"
-		[ "$rv" != 0 ] || [ "$bk_len" -le "$bk_len_old" ] && bk_failed "$FAIL back up ipset '$ipset'."
-		OK
-	done
-
-	printf %s "Compressing backup... "
-	bk_file="${bk_dir}/${p_name}_backup.${bk_ext:-bak}"
-	$compr_cmd < "$tmp_file" > "${bk_file}.new" &&  [ -s "${bk_file}.new" ] ||
-		bk_failed "$FAIL compress firewall backup to file '${bk_file}.new'."
-
-	mv "${bk_file}.new" "$bk_file" || bk_failed "$FAIL overwrite file '$bk_file'."
-	OK
-
+	bk_file="${bk_dir_new}/${p_name}_backup.${bk_ext:-bak}"
+	ipsets="$(ipset list -n | grep "$geotag")" || { echolog "create_backup: no ipsets found."; return 0; }
+	for ipset in $ipsets; do
+		ipset save "$ipset" || {
+			touch "$bk_failed_file"
+			echolog -err "${_nl}$FAIL create backup of ipset '$ipset'."
+			exit 1
+		}
+	done | eval "$compr_cmd" > "$bk_file" && [ ! -f "$bk_failed_file" ] && [ -s "$bk_file" ] ||
+		bk_failed "${_nl}$FAIL create backup of $p_name ipsets."
 	:
 }
 
 ipt_table=mangle
-iface_chain="${geochain}_WAN"
 ipt_comm="-m comment --comment"
+inbound_iface_chain=${p_name_cap}_WAN_IN outbound_iface_chain=${p_name_cap}_WAN_OUT
+inbound_base_geochain=PREROUTING outbound_base_geochain=POSTROUTING

@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5.2
+curr_ver=0.6.7
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -16,15 +16,16 @@ oldifs
 usage() {
 cat <<EOF
 
-Usage: $me <action> [-n] [-d] [-V] [-h]
+Usage: $me <action> [-n] [-s] [-d] [-V] [-h]
 
-Creates a backup of the current firewall state and current ip sets or restores them from backup.
+Creates a backup of the current firewall state and current ipsets or restores them from backup.
 
 Actions:
-  create-backup|restore  : create a backup of, or restore $p_name config, ip sets and firewall rules
+  create-backup|restore  : create a backup of, or restore $p_name config, ipsets and firewall rules
 
 Options:
   -n  : Do not restore config and status files
+  -s  : Only restore or create backup of config and status files
   -d  : Debug
   -V  : Version
   -h  : This help
@@ -38,10 +39,11 @@ case "$action" in
 	* ) unknownact
 esac
 
-restore_config=1
-while getopts ":ndVh" opt; do
+restore_conf=1 only_conf_status=
+while getopts ":nsdVh" opt; do
 	case $opt in
-		n) restore_config= ;;
+		n) restore_conf= ;;
+		s) only_conf_status=1 ;;
 		d) ;;
 		V) echo "$curr_ver"; exit 0 ;;
 		h) usage; exit 0 ;;
@@ -56,6 +58,34 @@ is_root_ok
 
 
 
+
+bk_failed() {
+	[ "$1" ] && echolog -err "$1"
+	rm_bk_tmp
+	die "$FAIL create backup of $p_name ipsets."
+}
+
+rm_bk_tmp() {
+	set +f
+	rm -rf "$bk_dir_new"
+	rm -f "$bk_failed_file" "$tmp_file" "$iplist_dir/"*.iplist
+}
+
+rstr_failed() {
+	rm_rstr_tmp
+	export main_config=
+	[ "$1" ] && echolog -err "$1"
+	[ "$2" = reset ] && {
+		echolog -err "*** Geoblocking is not working. Removing geoblocking firewall rules. ***"
+		rm_all_georules
+	}
+	die
+}
+
+rm_rstr_tmp() {
+	set +f
+	rm -f "$tmp_file" "$iplist_dir/"*.iplist
+}
 
 set_extract_cmd() {
 	set_extr_cmd() { checkutil "$1" && extract_cmd="$1 -cd" ||
@@ -83,18 +113,20 @@ set_archive_type() {
 }
 
 cp_conf() {
-	unset src_f dest_f
+	unset src_f src_d dest_f dest_d
 	case "$1" in
-		restore) src_f=_bak; cp_act=Restoring ;;
-		backup) dest_f=_bak; cp_act="Creating backup of" ;;
+		restore) src_f=_bak; src_d="$bk_dir/"; cp_act=Restoring ;;
+		backup) dest_f=_bak; dest_d="$bk_dir_new/"; cp_act="Creating backup of" ;;
 		*) echolog -err "cp_conf: bad argument '$1'"; return 1
 	esac
 
 	for bak_f in status config; do
-		eval "cp_src=\"\$${bak_f}_file$src_f\" cp_dest=\"\$${bak_f}_file$dest_f\""
+		eval "cp_src=\"$src_d\$${bak_f}_file$src_f\" cp_dest=\"$dest_d\$${bak_f}_file$dest_f\""
 		[ "$cp_src" ] && [ "$cp_dest" ] || { echolog -err "cp_conf: $FAIL set \$cp_src or \$cp_dest"; return 1; }
 		[ -f "$cp_src" ] || continue
-		[ -f "$cp_dest" ] && compare_files "$cp_src" "$cp_dest" && continue
+		[ -f "$cp_dest" ] && compare_files "$cp_src" "$cp_dest" && {
+			continue
+		}
 		printf %s "$cp_act the $bak_f file... "
 		cp "$cp_src" "$cp_dest" || { echolog -err "$cp_act the $bak_f file failed."; return 1; }
 		OK
@@ -102,12 +134,16 @@ cp_conf() {
 }
 
 getconfig families
-getconfig iplists
+[ ! "$inbound_iplists" ] && getconfig inbound_iplists
+[ ! "$outbound_iplists" ] && getconfig outbound_iplists
 
 bk_dir="$datadir/backup"
+bk_dir_new="${bk_dir}.new"
 config_file="$conf_file"
-config_file_bak="$bk_dir/${p_name}.conf.bak"
-status_file_bak="$bk_dir/status.bak"
+config_file_bak="${p_name}.conf.bak"
+status_file="$datadir/status"
+status_file_bak="status.bak"
+bk_failed_file="/tmp/$p_name-backup-failed"
 
 checkvars _fw_backend datadir
 
@@ -117,25 +153,71 @@ mk_lock
 set +f
 case "$action" in
 	create-backup)
-		trap 'rm_bk_tmp; die' INT TERM HUP QUIT
+		trap 'trap - INT TERM HUP QUIT; rm_bk_tmp; die' INT TERM HUP QUIT
 		tmp_file="/tmp/${p_name}_backup.tmp"
+		[ "$only_conf_status" ] && {
+			bk_dir_new="$bk_dir"
+			mkdir -p "$bk_dir" && chmod -R 600 "$bk_dir" && chown -R root:root "$bk_dir" &&
+			cp_conf backup || die "$FAIL create backup of the config and status files."
+			die 0
+		}
 		set_archive_type
-		mkdir "$bk_dir" 2>/dev/null
-		create_backup
-		rm "$tmp_file" 2>/dev/null
+		mkdir -p "$bk_dir_new" && chmod -R 600 "$bk_dir_new" && chown -R root:root "$bk_dir_new"
+		san_str iplists "$inbound_iplists $outbound_iplists" || die
+		printf_s "Creating backup of $p_name ip sets... "
+		rm -f "$bk_failed_file"
+		create_backup && OK
+		rm -f "$tmp_file"
 		setconfig "bk_ext=${bk_ext:-bak}" &&
 		cp_conf backup || bk_failed
-		printf '%s\n\n' "Successfully created backup of $p_name config, ip sets and firewall rules." ;;
+		rm -rf "$bk_dir"
+		mv "$bk_dir_new" "$bk_dir" || bk_failed
+		chmod -R 600 "$bk_dir" && chown -R root:root "$bk_dir" ||
+			echolog -err "$FAIL set permissions for the backup directory '$bk_dir'."
+
+		printf '%s\n\n' "Successfully created backup of $p_name state." ;;
 	restore)
-		trap 'rm_rstr_tmp; die' INT TERM HUP QUIT
-		printf '%s\n' "Preparing to restore $p_name from backup..."
-		[ "$restore_conf" ] && bk_conf_file="$config_file_bak" || bk_conf_file="$config_file"
-		[ ! -s "$bk_conf_file" ] && rstr_failed "File '$bk_conf_file' is empty or doesn't exist."
-		getconfig iplists iplists "$bk_conf_file" &&
-		getconfig bk_ext bk_ext "$bk_conf_file" || rstr_failed
-		set_extract_cmd "$bk_ext"
-		restorebackup
-		printf '%s\n\n' "Successfully completed action 'restore'."
+		trap 'trap - INT TERM HUP QUIT; rm_rstr_tmp; die' INT TERM HUP QUIT
+		if [ "$restore_conf" ]; then
+			bk_conf_file="$bk_dir/$config_file_bak"
+			and_config=" and config"
+		else
+			bk_conf_file="$config_file"
+			and_config=
+		fi
+		[ "$only_conf_status" ] && {
+			cp_conf restore || die "$FAIL restore the config and status files."
+			die 0
+		}
+		echolog "${_nl}Preparing to restore $p_name ip lists$and_config from backup..."
+		[ ! -s "$bk_conf_file" ] && rstr_failed "Config file '$bk_conf_file' is empty or doesn't exist."
+		getconfig inbound_iplists inbound_iplists "$bk_conf_file" &&
+		getconfig outbound_iplists outbound_iplists "$bk_conf_file" &&
+		getconfig bk_ext bk_ext "$bk_conf_file" || rstr_failed "$FAIL get backup config."
+		san_str iplists "$inbound_iplists $outbound_iplists" || die
+
+		if [ "$iplists" ]; then
+			get_counters
+			set_extract_cmd "$bk_ext"
+			extract_iplists
+		else
+			echolog "No ip lists registered - skipping iplist extraction."
+		fi
+
+		rm_all_georules || rstr_failed "$FAIL remove firewall rules and ipsets."
+
+		[ "$restore_conf" ] && { cp_conf restore || rstr_failed; }
+
+		export main_config=
+
+		[ "$_fw_backend" = ipt ] && { restore_ipsets || rstr_failed "$FAIL restore $p_name ipsets from backup." reset; }
+		call_script "$i_script-apply.sh" restore
+		apply_rv=$?
+
+		rm_rstr_tmp
+		[ "$apply_rv" != 0 ] && rstr_failed "$FAIL restore $p_name ip lists$and_config from backup." "reset"
+
+		[ "$restore_conf" ] && echolog "Successfully completed action 'restore'."
 esac
 
 die 0

@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5.2
+curr_ver=0.6.7
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -182,7 +182,7 @@ is_root_ok
 
 check_cron_job() {
 	get_matching_line "$curr_cron" "*" "${p_name}-$1" "" curr_job
-	case "$curr_job" in "$2 \"$run_cmd\""*) return 0; esac
+	case "$curr_job" in "$2 $run_cmd"*) return 0; esac
 	return 1
 }
 
@@ -194,33 +194,37 @@ create_cron_job() {
 
 	job_type="$1" w_sch=
 
-	[ -z "$iplists" ] && die "Countries list in the config file is empty! No point in creating cron jobs."
+	[ -z "$inbound_iplists$outbound_iplists" ] && {
+		rm_cron_job update
+		rm_cron_job persistence
+		echo
+		die 0 "Configured countries list is empty. Not creating cron jobs."
+	}
 
 	curr_cron="$(get_curr_cron)" || die "$FAIL read crontab."
 	case "$job_type" in
 		update)
 			[ -z "$schedule" ] && die "Cron schedule in the config file is empty!"
 			check_cron_job update "$schedule" && return 0
-			
 			val_cron_exp "$schedule"; rv=$?
 			case "$rv" in
-				0)  ;;
+				0)
+					;;
 				*) die "$FAIL validate cron schedule '$schedule'."
 			esac
 
 			rm_cron_job update
 			curr_cron="$(get_curr_cron)" || die "$FAIL read crontab."
-			cron_cmd="$schedule \"$run_cmd\" update -a 1>/dev/null 2>/dev/null # ${p_name}-update"
+			cron_cmd="$schedule $run_cmd update -a 1>/dev/null 2>/dev/null # ${p_name}-update"
 			w_sch=" with schedule '$schedule'" ;;
 		persistence)
 			check_cron_job persistence "@reboot" && return 0
 
-			cron_cmd="@reboot \"$run_cmd\" restore -a 1>/dev/null 2>/dev/null # ${p_name}-persistence" ;;
+			cron_cmd="@reboot $run_cmd restore -a 1>/dev/null 2>/dev/null # ${p_name}-persistence" ;;
 		*) die "Unrecognized type of cron job: '$job_type'."
 	esac
 
-	
-	printf '%s\n' "${curr_cron#"$_nl"}$_nl$cron_cmd" | crontab -u root - ||
+	printf '%s\n' "${curr_cron#"$_nl"}$_nl$cron_cmd" | crontab -u root - 1>/dev/null 2>/dev/null ||
 		die "$FAIL create $job_type cron job."
 }
 
@@ -232,13 +236,12 @@ rm_cron_job() {
 		*) die "rm_cron_job: unknown cron job type '$job_type'."
 	esac
 
-	
 	curr_cron="$(get_curr_cron)" || die "$FAIL read crontab."
-	printf '%s\n' "$curr_cron" | grep -v "${p_name}-${job_type}" | crontab -u root - ||
+	printf '%s\n' "$curr_cron" | grep -v "${p_name}-${job_type}" | crontab -u root - 1>/dev/null 2>/dev/null ||
 		die "$FAIL remove $job_type cron job."
 }
 
-for entry in schedule no_persist iplists; do
+for entry in schedule no_persist inbound_iplists outbound_iplists; do
 	getconfig "$entry"
 done
 
@@ -246,9 +249,10 @@ run_cmd="$i_script-run.sh"
 
 schedule="${schedule:-$default_schedule}"
 
-printf %s "Processing cron jobs..."
+printf_s "Processing cron jobs... "
 
-check_cron_compat
+persist_support=1
+check_cron_compat || persist_support=
 checkvars no_persist
 
 case "$schedule" in
@@ -257,6 +261,7 @@ case "$schedule" in
 esac
 
 [ ! "$_OWRTFW" ] && {
+	[ ! "$persist_support" ] && { rm_cron_job persistence; exit 0; }
 	case "$no_persist" in
 		false) create_cron_job persistence ;;
 		true) rm_cron_job persistence

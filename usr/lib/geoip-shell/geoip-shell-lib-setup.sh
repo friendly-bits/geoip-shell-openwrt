@@ -1,13 +1,13 @@
 #!/bin/sh
 
-curr_ver=0.5.2
+curr_ver=0.6.7
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
 
-validate_arg_ccodes() {
+validate_ccodes() {
 	bad_ccodes=
-	for ccode in $ccodes_arg; do
+	for ccode in $1; do
 		validate_ccode "$ccode"
 		case $? in
 			1) die "Internal error while validating country codes." ;;
@@ -21,9 +21,9 @@ pick_user_ccode() {
 	[ "$user_ccode_arg" = none ] || { [ "$nointeract" ] && [ ! "$user_ccode_arg" ]; } && { user_ccode=none; return 0; }
 
 	[ ! "$user_ccode_arg" ] && printf '\n%s\n%s\n' "${blue}Please enter your country code.$n_c" \
-		"It will be used to check if your geoip settings may block your own country and warn you if so."
+		"It will be used to check if your geoblocking settings may block your own country and warn you if so."
 	REPLY="$user_ccode_arg"
-	while true; do
+	while :; do
 		[ ! "$REPLY" ] && {
 			printf %s "Country code (2 letters)/Enter to skip: "
 			read -r REPLY
@@ -52,42 +52,44 @@ pick_user_ccode() {
 
 pick_ccodes() {
 	[ "$nointeract" ] && [ ! "$ccodes_arg" ] && die "Specify country codes with '-c <\"country_codes\">'."
-	[ ! "$ccodes_arg" ] && printf '\n%s\n' "${blue}Please enter country codes to include in geoip $geomode.$n_c"
+	[ ! "$ccodes_arg" ] && printf '\n%s\n' "${blue}Please enter country codes to include in $direction geoblocking $geomode.$n_c"
 	REPLY="$ccodes_arg"
-	while true; do
+	while :; do
 		unset bad_ccodes ok_ccodes
 		[ ! "$REPLY" ] && {
 			printf %s "Country codes (2 letters) or [a] to abort: "
 			read -r REPLY
 		}
 		case "$REPLY" in *[!A-Za-z\ ,\;]*)
-			printf '%s\n' "Invalid country codes '$REPLY'" >&2
+			msg="Invalid country codes: '$REPLY'."
+			[ "$nointeract" ] && die "$msg"
+			printf '%s\n' "$msg" >&2
 			REPLY=
-			[ "$nointeract" ] && die 1
 			continue
 		esac
 		toupper REPLY
 		trimsp REPLY
 		case "$REPLY" in
-			a|A) die 0 ;;
+			a|A) die 253 ;;
 			*)
 				newifs ' ;,' pcc
 				for ccode in $REPLY; do
 					[ "$ccode" ] && {
-						validate_ccode "$ccode" && ok_ccodes="$ok_ccodes$ccode " ||
-							bad_ccodes="$bad_ccodes$ccode "
+						validate_ccode "$ccode" && ok_ccodes="$ok_ccodes$ccode " || bad_ccodes="$bad_ccodes$ccode "
 					}
 				done
 				oldifs pcc
 				[ "$bad_ccodes" ] && {
-					printf '%s\n' "Invalid 2-letter country codes: '${bad_ccodes% }'."
-					[ "$nointeract" ] && die 1
+					msg="Invalid 2-letter country codes: '${bad_ccodes% }'."
+					[ "$nointeract" ] && die "$msg"
+					printf '%s\n' "$msg" >&2
 					REPLY=
 					continue
 				}
 				[ ! "$ok_ccodes" ] && {
-					printf '%s\n' "No country codes detected in '$REPLY'."
-					[ "$nointeract" ] && die 1
+					msg="No valid country codes detected in '$REPLY'."
+					[ "$nointeract" ] && die "$msg"
+					printf '%s\n' "$msg" >&2
 					REPLY=
 					continue
 				}
@@ -97,18 +99,20 @@ pick_ccodes() {
 }
 
 pick_geomode() {
-	printf '\n%s\n' "${blue}Select geoip blocking mode:$n_c [w]hitelist or [b]lacklist, or [a] to abort."
-	pick_opt "w|b|a"
+	printf '\n%s\n' "${blue}Select *$direction* geoblocking mode:$n_c [w]hitelist or [b]lacklist or [d]isable, or [a] to abort."
+	[ "$direction" = outbound ] && printf '%s\n' \
+		"${yellow}*NOTE*${n_c}: this may block Internet access if you are not careful. If unsure, select [d]isable."
+	pick_opt "w|b|d|a"
 	case "$REPLY" in
-		w|W) geomode=whitelist ;;
-		b|B) geomode=blacklist ;;
-		a|A) die 0
+		w) geomode=whitelist ;;
+		b) geomode=blacklist ;;
+		d) geomode=disable ;;
+		a) die 253
 	esac
 }
 
 pick_ifaces() {
 	all_ifaces="$(detect_ifaces)" || die "$FAIL detect network interfaces."
-
 	[ ! "$ifaces_arg" ] && {
 		auto_ifaces=
 		[ "$_OWRTFW" ] && auto_ifaces="$(fw$_OWRTFW zone wan)"
@@ -121,27 +125,31 @@ pick_ifaces() {
 	}
 
 	nl2sp all_ifaces
-	printf '\n%s\n' "${yellow}*NOTE*: ${blue}Geoip firewall rules will be applied to specific network interfaces of this machine.$n_c"
+	printf '\n%s\n' "${yellow}*NOTE*: ${blue}Geoblocking firewall rules will be applied to specific network interfaces of this machine.$n_c"
 	[ ! "$ifaces_arg" ] && [ "$auto_ifaces" ] && {
 		printf '%s\n%s\n' "All found network interfaces: $all_ifaces" \
-			"Autodetected WAN interfaces: $blue$auto_ifaces$n_c"
-		[ "$1" = "-a" ] && { ifaces="$auto_ifaces"; return; }
+			"Automatically detected WAN interfaces: $blue$auto_ifaces$n_c"
+		[ "$1" = "-a" ] && { ifaces="$auto_ifaces"; ifaces_picked=1; return; }
+		[ "$nointeract" ] && die
 		printf '%s\n' "[c]onfirm, c[h]ange, or [a]bort?"
 		pick_opt "c|h|a"
 		case "$REPLY" in
-			c|C) ifaces="$auto_ifaces"; return ;;
-			a|A) die 0
+			c) ifaces="$auto_ifaces"; ifaces_picked=1; return ;;
+			a) die 253
 		esac
 	}
 
+	[ "$1" = "-a" ] && [ ! "$ifaces_arg" ] && [ ! "$auto_ifaces" ] && [ "$nointeract" ] &&
+		die "$FAIL automatically detect WAN network interfaces."
+
 	REPLY="$ifaces_arg"
-	while true; do
+	while :; do
 		u_ifaces=
-		printf '\n%s\n' "All found network interfaces: $all_ifaces"
-		[ ! "$REPLY" ] && {
-			printf '%s\n' "Type in WAN network interface names, or [a] to abort."
+		[ ! "$REPLY" ] && [ ! "$nointeract" ] && {
+			printf '%s\n%s\n' "All found network interfaces: $all_ifaces" \
+				"Type in WAN network interface names, or [a] to abort."
 			read -r REPLY
-			case "$REPLY" in a|A) die 0; esac
+			case "$REPLY" in a|A) die 253; esac
 		}
 		san_str u_ifaces "$REPLY"
 		[ -z "$u_ifaces" ] && {
@@ -156,9 +164,11 @@ pick_ifaces() {
 		echo
 		[ "$nointeract" ] && die
 		REPLY=
+		printf '\n'
 	done
 	ifaces="$u_ifaces"
 	printf '%s\n' "Selected interfaces: '$ifaces'."
+	ifaces_picked=1
 }
 
 validate_arg_ips() {
@@ -177,7 +187,7 @@ validate_arg_ips() {
 		va_ips_a="$va_ips_a$va_ips_f$_nl"
 	done
 	subtract_a_from_b "$va_ips_a" "$va_ips_i" bad_ips "$_nl" ||
-		{ nl2sp bad_ips; echolog -err "Invalid ip's: '$bad_ips'"; return 1; }
+		{ nl2sp bad_ips; echolog -err "Invalid ip's for families '$families': '$bad_ips'"; return 1; }
 
 	for f in $families; do
 		eval "${2}_$f=\"\$va_$f\""
@@ -185,11 +195,37 @@ validate_arg_ips() {
 	:
 }
 
+pick_ips() {
+	pi_var="$1"
+	pi_family="$2"
+	pi_msg="$3"
+	while :; do
+		unset REPLY pi_ips
+		printf '\n%s\n' "Type in $family addresses for $pi_msg, [s] to skip or [a] to abort."
+		read -r REPLY
+		case "$REPLY" in
+			s|S) unset "$pi_var"; return 1 ;;
+			a|A) die 253
+		esac
+		case "$REPLY" in *[!A-Za-z0-9.:/\ ]*)
+			printf '%s\n' "Invalid ip adresses: '$REPLY'"
+			continue
+		esac
+		san_str pi_ips "$REPLY"
+		[ -z "$pi_ips" ] && continue
+		validate_ip "$pi_ips" "$family" && break
+	done
+	eval "$pi_var=\"$pi_ips\""
+}
+
 pick_lan_ips() {
-	confirm_ips() { eval "lan_ips_$family=\"$ipset_type:$u_ips\""; }
+	confirm_ips() {
+		unset "lan_ips_$family"
+		[ "$lan_ips" ] && eval "lan_ips_$family=\"$ipset_type:$lan_ips\""
+	}
 
 	lan_picked=1
-	unset autodetect ipset_type u_ips lan_ips_ipv4 lan_ips_ipv6
+	unset autodetect ipset_type lan_ips lan_ips_ipv4 lan_ips_ipv6
 	case "$lan_ips_arg" in
 		none) return 0 ;;
 		auto) lan_ips_arg=''; autodetect=1
@@ -203,57 +239,104 @@ pick_lan_ips() {
 		[ ! "$autodetect" ] && echo "You can specify LAN subnets and/or individual ip's to allow."
 	}
 
+	[ -s "${_lib}-ip-tools.sh" ] && . "${_lib}-ip-tools.sh" || echolog -err "$FAIL source ${_lib}-ip-tools.sh"
+
 	for family in $families; do
-		printf '\n%s\n' "Detecting $family LAN subnets..."
-		u_ips="$(call_script "$_script-detect-lan.sh" -s -f "$family")" || {
-			echolog -err "$FAIL detect $family LAN subnets."
+		ipset_type=net
+		echo
+		command -v get_lan_subnets 1>/dev/null && {
+			printf %s "Detecting $family LAN subnets..."
+			lan_ips="$(get_lan_subnets "$family")"
+		} || {
 			[ "$nointeract" ] && die
 		}
 
-		[ -n "$u_ips" ] && {
-			nl2sp u_ips
-			ipset_type="net"
-			printf '\n%s\n' "Autodetected $family LAN subnets: '$blue$u_ips$n_c'."
+		[ -n "$lan_ips" ] && {
+			nl2sp lan_ips
+			printf '\n%s\n' "Automatically detected $family LAN subnets: '$blue$lan_ips$n_c'."
 			[ "$autodetect" ] && { confirm_ips; continue; }
 			printf '%s\n%s\n' "[c]onfirm, c[h]ange, [s]kip or [a]bort?" \
 				"Verify that correct LAN subnets have been detected in order to avoid accidental lockout or other problems."
 			pick_opt "c|h|s|a"
 			case "$REPLY" in
-				c|C) confirm_ips; continue ;;
-				s|S) continue ;;
-				h|H) autodetect_off=1 ;;
-				a|A) die 0
+				c) confirm_ips; continue ;;
+				s) continue ;;
+				h) autodetect_off=1 ;;
+				a) die 253
 			esac
 		}
 
-		while true; do
-			unset REPLY u_ips
-			ipset_type=ip
-			[ ! "$nointeract" ] && {
-				printf '\n%s\n' "Type in $family LAN ip addresses and/or subnets, [s] to skip or [a] to abort."
-				read -r REPLY
-				case "$REPLY" in
-					s|S) break ;;
-					a|A) die 0
-				esac
-			}
-			case "$REPLY" in *[!A-Za-z0-9.:/\ ]*)
-				printf '%s\n' "Invalid ip's '$REPLY'"
-				REPLY=
-				[ "$nointeract" ] && die
-				continue
-			esac
-			san_str u_ips "$REPLY"
-			[ -z "$u_ips" ] && { [ "$nointeract" ] && die; continue; }
-			validate_ip "$u_ips" "$family" && break
-		done
+		pick_ips lan_ips "$family" "LAN ip addresses and/or subnets" || continue
 		confirm_ips
 	done
+	echo
 
 	[ "$autodetect" ] || [ "$autodetect_off" ] && return
-	printf '\n%s\n' "${blue}A[u]to-detect LAN subnets when updating ip lists or keep this config c[o]nstant?$n_c"
+	printf '%s\n' "${blue}A[u]tomatically detect LAN subnets when updating ip lists or keep this config c[o]nstant?$n_c"
 	pick_opt "u|o"
-	case "$REPLY" in u|U) autodetect="1"; esac
+	[ "$REPLY" = u ] && autodetect=1
+}
+
+pick_source_ips() {
+	confirm_ips() {
+		unset "source_ips_$family"
+		[ "$source_ips" ] && eval "source_ips_$family=\"$ipset_type:$source_ips\""
+	}
+
+	unset source_ips_autodetect source_ips_policy source_ips source_ips_ipv4 source_ips_ipv6 ipset_type
+	tolower source_ips_arg
+	case "$source_ips_arg" in
+		pause|none) source_ips_policy="$source_ips_arg"; source_ips_arg=''; return 0 ;;
+		auto) source_ips_arg=''; source_ips_autodetect=1
+	esac
+
+	[ "$source_ips_arg" ] && {
+		validate_arg_ips "$source_ips_arg" source_ips && return 0
+		[ "$nointeract" ] && die
+	}
+
+	if [ ! "$source_ips_autodetect" ]; then
+		[ "$nointeract" ] && return 0
+		printf '\n%s\n%s\n%s\n%s\n' "$WARN outbound geoblocking may prevent $p_name from being able to automatically update ip lists." \
+			"To safeguard automatic ip list updates, either choose ip addresses of the download servers to bypass outbound geoblocking," \
+			"  or enable pausing of outbound geoblocking before each ip lists update." \
+			"[C]hoose ip addresses, [p]ause outbound geoblocking every time before ip list updates, [s]kip or [a]bort?"
+		pick_opt "c|p|s|a"
+		case "$REPLY" in
+			c) source_ips_policy= ;;
+			p) source_ips_policy=pause; return 0 ;;
+			s) source_ips_policy=none; return 0 ;;
+			a) die 253
+		esac
+	fi
+
+	for family in $families; do
+		ipset_type=ip
+		echo
+		source_ips="$(resolve_geosource_ips "$family")"
+
+		if [ -n "$source_ips" ]; then
+			nl2sp source_ips
+			printf '\n%s\n' "Automatically detected $family addresses for source '$geosource': '$blue$source_ips$n_c'."
+			[ "$source_ips_autodetect" ] && { confirm_ips; continue; }
+			printf '%s\n' "[c]onfirm, c[h]ange, [a]bort?"
+			pick_opt "c|h|a"
+			case "$REPLY" in
+				c) confirm_ips; continue ;;
+				h) ;;
+				a) die 253
+			esac
+		elif [ "$geosource" = ipdeny ] && [ "$family" = ipv6 ]; then
+				printf '%s\n' "At this time the 'ipdeny' servers do not have ipv6 addresses - skipping."
+				continue
+		else
+			printf '%s\n' "$FAIL automatically detect $family addresses for source '$geosource'."
+		fi
+
+		pick_ips source_ips "$family" "addresses for source '$geosource'" || continue
+		confirm_ips
+	done
+	echo
 }
 
 invalid_str() { echolog -err "Invalid string '$1'."; }
@@ -265,27 +348,32 @@ check_edge_chars() {
 }
 
 parse_ports() {
-	check_edge_chars "$_ranges" "," || return 1
+	invalid_ports() { echolog -err "Invalid string in ports expression: '$1'."; }
+	check_edge_chars "$1" "," || return 1
 	ranges_cnt=0
+	_ports=
 	IFS=","
-	for _range in $_ranges; do
+	for _range in $1; do
 		ranges_cnt=$((ranges_cnt+1))
 		trimsp _range
-		check_edge_chars "$_range" "-" || return 1
-		case "${_range#*-}" in *-*) invalid_str "$_range"; return 1; esac
+		check_edge_chars "$_range" '-' || return 1
+		case "${_range#*"-"}" in *-*) invalid_ports "$_range"; return 1; esac
 		IFS="-"
 		for _port in $_range; do
 			trimsp _port
-			case "$_port" in *[!0-9]*) invalid_str "$_port"; return 1; esac
-			_ports="$_ports$_port$p_delim"
+			case "$_port" in *[!0-9]*) invalid_ports "$_port"; return 1; esac
+			_ports="$_ports$_port-"
 		done
-		_ports="${_ports%"$p_delim"},"
-		case "$_range" in *-*) [ "${_range%-*}" -ge "${_range##*-}" ] && { invalid_str "$_range"; return 1; }; esac
+		_ports="${_ports%"-"},"
+		case "$_range" in *-*)
+			[ "${_range%"-"*}" -ge "${_range##*"-"}" ] &&
+			{ invalid_ports "$_range"; return 1; }
+		esac
 	done
 	[ "$ranges_cnt" = 0 ] && { echolog -err "No ports specified for protocol $_proto."; return 1; }
 	_ports=":${_ports%,}"
 
-	[ "$_fw_backend" = ipt ] && [ "$ranges_cnt" -gt 1 ] && mp="multiport"
+	[ "$ranges_cnt" -gt 1 ] && mp="multiport "
 	:
 }
 
@@ -293,14 +381,13 @@ setports() {
 	tolower _lines "$1"
 	newifs "$_nl" sp
 	for _line in $_lines; do
-		unset ranges _ports neg mp skip
+		unset ranges _ports neg mp
 		trimsp _line
 		check_edge_chars "$_line" ":" || return 1
 		IFS=':'
 		set -- $_line
 		[ $# != 3 ] && { echolog -err "Invalid syntax '$_line'"; return 1; }
 		_proto="$1"
-		p_delim='-'
 		proto_act="$2"
 		_ranges="$3"
 		trimsp _ranges
@@ -311,9 +398,13 @@ setports() {
 			block) neg='!' ;;
 			*) { echolog -err "Expected 'allow' or 'block' instead of '$proto_act'"; return 1; }
 		esac
+		eval "reg_proto=\"\$${direction}_reg_proto\""
 		case $_proto in
-			udp|tcp) case "$reg_proto" in *"$_proto"*) echolog -err "Can't add protocol '$_proto' twice"; return 1; esac
-				reg_proto="$reg_proto$_proto " ;;
+			udp|tcp)
+				case "$reg_proto" in *"$_proto"*)
+					echolog -err "Can't add protocol '$_proto' twice for direction '$direction'."; return 1
+				esac
+				eval "${direction}_reg_proto=\"$reg_proto$_proto \"" ;;
 			*) echolog -err "Unsupported protocol '$_proto'."; return 1
 		esac
 
@@ -321,12 +412,11 @@ setports() {
 			_ports=
 			[ "$neg" ] && ports_exp=skip || ports_exp=all
 		else
-			parse_ports || return 1
-			ports_exp="$mp ${neg}dport"
+			parse_ports "$_ranges" || return 1
+			ports_exp="$mp${neg}dport"
 		fi
 		trimsp ports_exp
-		eval "${_proto}_ports=\"$ports_exp$_ports\""
-		
+		eval "${direction}_${_proto}_ports=\"$ports_exp$_ports\" ${_proto}_ports=\"$ports_exp$_ports\""
 	done
 	oldifs sp
 }
@@ -337,34 +427,18 @@ warn_lockout() {
 }
 
 set_defaults() {
-	if [ "$_OWRTFW" ]; then
-		geosource_def=ipdeny datadir_def="/tmp/$p_name-data" nobackup_def=true
-		case "$_OWRTFW" in
-			3) _fw_backend=ipt ;;
-			4) _fw_backend=nft
-		esac
-	else
-		geosource_def=ripe datadir_def="/var/lib/$p_name" nobackup_def=false
-		. "$_lib-check-compat.sh" || exit 1
-		[ ! "$_fw_backend_arg" ] && {
-			if check_fw_backend nft; then
-				_fw_backend_def=nft
-			elif check_fw_backend ipt; then
-				_fw_backend_def=ipt
-			fi
-		} 2>/dev/null
-	fi
+	_fw_backend_def="$(detect_fw_backend)" || die
 
 	[ ! "$nft_perf" ] && {
 		nft_perf_def=memory
 		IFS=': ' read -r _ memTotal _ < /proc/meminfo 2>/dev/null
 		case "$memTotal" in
 			''|*![0-9]*) ;;
-			*) [ $memTotal -ge 2097152 ] && nft_perf_def=performance
+			*) [ $memTotal -ge 1884160 ] && nft_perf_def=performance
 		esac
 	}
 
-	noblock_def=false no_persist_def=false
+	noblock_def=false no_persist_def=false force_cron_persist_def=false
 
 	[ ! "$schedule" ] && {
 		rand_int="$(tr -cd 0-9 < /dev/urandom | dd bs=1 count=1 2>/dev/null)"
@@ -373,30 +447,42 @@ set_defaults() {
 		def_sch_minute=$((10+rand_int))
 	}
 
+	if [ "$_OWRTFW" ]; then
+		geosource_def=ipdeny datadir_def="/tmp/$p_name-data" nobackup_def=true
+	else
+		geosource_def=ripe datadir_def="/var/lib/$p_name" nobackup_def=false
+	fi
+
 	: "${nobackup:="$nobackup_def"}"
 	: "${datadir:="$datadir_def"}"
 	: "${schedule:="$def_sch_minute 4 * * *"}"
 	: "${families:="ipv4 ipv6"}"
 	: "${geosource:="$geosource_def"}"
 	: "${_fw_backend:="$_fw_backend_def"}"
-	: "${tcp_ports:=skip}"
-	: "${udp_ports:=skip}"
+	: "${inbound_tcp_ports:=skip}"
+	: "${inbound_udp_ports:=skip}"
+	: "${outbound_tcp_ports:=skip}"
+	: "${outbound_udp_ports:=skip}"
 	: "${nft_perf:=$nft_perf_def}"
 	: "${reboot_sleep:=30}"
-	: "${max_attempts:=30}"
+	: "${max_attempts:=5}"
 	: "${noblock:=$noblock_def}"
 	: "${no_persist:=$no_persist_def}"
+	: "${force_cron_persist:=$force_cron_persist_def}"
 }
 
-get_prefs() {
+get_general_prefs() {
 	set_defaults
-
-	[ "$_fw_backend_arg" ] && [ "$_OWRTFW" ] && die "Changing the firewall backend is unsupported on OpenWrt."
-	[ ! "$_OWRTFW" ] && {
-		_fw_backend="${_fw_backend_arg:-$_fw_backend}"
-		[ ! "$_fw_backend" ] && die "Neither nftables nor iptables+ipset found."
-		check_fw_backend "$_fw_backend" || die
+	[ "$_fw_backend_arg" ] && {
+		[ "$_OWRTFW" ] && die "Changing the firewall backend is unsupported on OpenWrt."
+		check_fw_backend "$_fw_backend_arg" ||
+		case $? in
+			1) die ;;
+			2) die "Firewall backend '${_fw_backend_arg}ables' not found." ;;
+			3) die "Utility 'ipset' not found."
+		esac
 	}
+	_fw_backend="${_fw_backend_arg:-$_fw_backend}"
 
 	[ "$nft_perf_arg" ] && {
 		[ "$_fw_backend" = ipt ] && die "Option -O does not work with iptables+ipset."
@@ -408,7 +494,7 @@ get_prefs() {
 	esac
 	nft_perf="${nft_perf_arg:-$nft_perf}"
 
-	for _par in "nobackup o" "noblock N" "no_persist n"; do
+	for _par in "nobackup o" "noblock N" "no_persist n" "force_cron_persist F"; do
 		par_name="${_par% *}" par_opt="${_par#* }"
 		eval "par_val=\"\${${par_name}_arg}\""
 		[ "$par_val" ] && tolower par_val
@@ -418,10 +504,14 @@ get_prefs() {
 		esac
 		eval "$par_name=\"\${${par_name}_arg:-\$$par_name}\""
 		eval "par_val=\"\$$par_name\""
+		eval "par_val_arg=\"\${${par_name}_arg}\""
 		case "$par_val" in
-			''|true|false) ;;
+			true) [ "$first_setup" ] && [ "$par_val_arg" != true ] && [ "$par_name" != nobackup ] &&
+						echolog -warn "${_nl}option '$par_name' is set to 'true' in config." ;;
+			false) ;;
 			*) eval "def_val=\"\$${par_name}_def\""
-				echolog -warn "Config has invalid value for parameter '$par_name': '$par_val'. Resetting to default: '$def_val'."
+				[ ! "$first_setup" ] &&
+					echolog -warn "Config has invalid value for parameter '$par_name': '$par_val'. Resetting to default: '$def_val'."
 				eval "$par_name=\"$def_val\""
 		esac
 	done
@@ -429,19 +519,22 @@ get_prefs() {
 	[ "$datadir_arg" ] && {
 		datadir_new="${datadir_arg%/}"
 		[ ! "$datadir_new" ] && die "Invalid directory '$datadir_arg'."
-		case "$datadir_new" in */*) ;; *) die "Invalid directory '$datadir_arg'."; esac
+		case "$datadir_new" in /*) ;; *) die "Invalid directory '$datadir_arg'."; esac
+		case "$datadir_new" in "$iplist_dir"|"$conf_dir") die "Directory '$datadir_new' is reserved. Please pick another one."; esac
 		[ "$datadir_new" != "$datadir" ] && {
-			{ find "$datadir_new" -mindepth 1 -maxdepth 1 | grep .; } 1>/dev/null 2>/dev/null &&
-				die "Can not create '$datadir_arg': it exists and is not empty."
+			{ find "$datadir_new" | head -n2 | grep -v "^$datadir_new\$"; } 1>/dev/null 2>/dev/null &&
+				die "Can not use directory '$datadir_arg': it exists and is not empty."
 		}
 		parent_dir="${datadir_new%/*}/"
-		[ ! -d "$parent_dir" ] && die "Can not create '$datadir_arg': parent directory '$parent_dir' doesn't exist."
+		[ ! -d "$parent_dir" ] && die "Can not create directory '$datadir_arg': parent directory '$parent_dir' doesn't exist."
 	}
 	datadir="${datadir_new:-"$datadir"}"
 
 	schedule="${schedule_arg:-"$schedule"}"
 
-	check_cron_compat
+	{ [ "$schedule" != "$schedule_prev" ] && [ "$schedule" != disable ]; } ||
+	{ [ "$no_persist" != "$no_persist_prev" ] && [ "$no_persist" = false ]; } &&
+		{ check_cron_compat || die; }
 	[ "$schedule_arg" ] && [ "$schedule_arg" != disable ] && {
 		call_script "$_script-cronsetup.sh" -x "$schedule_arg" || die "$FAIL validate cron schedule '$schedule_arg'."
 	}
@@ -456,136 +549,31 @@ get_prefs() {
 	esac
 	families="${families_arg:-"$families"}"
 
-	[ "$geosource_arg" ] && tolower geosource_arg
-	case "$geosource_arg" in ''|ripe|ipdeny) ;; *) die "Unsupported source: '$geosource_arg'."; esac
+	is_alphanum "$geosource_arg" && tolower geosource_arg && subtract_a_from_b "$valid_sources" "$geosource_arg" ||
+		die "Invalid source: '$geosource_arg'"
 	geosource="${geosource_arg:-$geosource}"
+	if [ "$geosource_arg" = maxmind ]; then
+		setup_maxmind || die 253
+	fi
 
 	case "$trusted_arg" in
 		none) unset trusted_ipv4 trusted_ipv6 ;;
 		'') ;;
-		*) validate_arg_ips "$trusted_arg" trusted || die
+		*)
+			validate_arg_ips "$trusted_arg" trusted && return 0
+			[ "$nointeract" ] && die
+			for family in $families; do
+				ipset_type=net
+				pick_ips trusted "$family" "trusted ip addresses or subnets" || continue
+				unset "trusted_$family"
+				[ "$trusted" ] && eval "trusted_$family=\"$ipset_type:$trusted\""
+			done
 	esac
 
-	[ "$ports_arg" ] && { setports "${ports_arg%"$_nl"}" || die; }
-
-	echo
-
-	[ "$geomode_arg" ] || [ ! "$geomode" ] && {
-		tolower geomode_arg
-		case "$geomode_arg" in
-			whitelist|blacklist) geomode="$geomode_arg" ;;
-			'') [ "$nointeract" ] && die "Specify geoip blocking mode with -m <whitelist|blacklist>"; pick_geomode ;;
-			*) [ "$nointeract" ] && die "Unrecognized geoip mode '$geomode_arg'!"; pick_geomode
-		esac
-		[ "$geomode" = blacklist ] && unset lan_ips_ipv4 lan_ips_ipv6
-	}
-
-	[ "$lan_ips_arg" ] && [ "$lan_ips_arg" != none ] && [ "$geomode" = blacklist ] &&
-		die "Option '-l' is incompatible with mode 'blacklist'."
-
-	{ [ ! "$ccodes" ] && [ ! "$iplists" ]; } || [ "$geomode_change" ] || [ "$ccodes_arg" ] && pick_ccodes
 	[ ! "$user_ccode" ] || [ "$user_ccode_arg" ] && pick_user_ccode
-
-	lan_picked=
-
-	if [ ! "$ifaces" ] && [ -z "$ifaces_arg" ]; then
-		[ "$nointeract" ] && die "Specify interfaces with -i <\"ifaces\"|auto|all>."
-		printf '\n%s\n%s\n%s\n%s\n' "${blue}Does this machine have dedicated WAN network interface(s)?$n_c [y|n] or [a] to abort." \
-			"For example, a router or a virtual private server may have it." \
-			"A machine connected to a LAN behind a router is unlikely to have it." \
-			"It is important to answer this question correctly."
-		pick_opt "y|n|a"
-		case "$REPLY" in
-			a|A) die 0 ;;
-			y|Y) pick_ifaces ;;
-			n|N) ifaces=all; [ "$geomode" = whitelist ] && { warn_lockout; pick_lan_ips; }
-		esac
-	elif [ "$ifaces_arg" ]; then
-		ifaces=
-		case "$ifaces_arg" in
-			all) ifaces=all
-				[ "$geomode" = whitelist ] && { [ "$in_install" ] || [ "$first_setup" ] || [ "$geomode_change" ] ||
-						[ "$ifaces_change" ]; } &&
-					{ warn_lockout; pick_lan_ips; } ;;
-			auto) ifaces_arg=''; pick_ifaces -a ;;
-			*) pick_ifaces
-		esac
-	elif [ "$geomode_change" ] && [ "$geomode" = whitelist ] && [ ! "$ifaces" ]; then
-		warn_lockout; pick_lan_ips
-	fi
-
-	[ "$lan_ips_arg" ] &&  [ ! "$lan_picked" ] && pick_lan_ips
-
-	[ "$_OWRTFW" ] && [ ! "$autodetect" ] && detect_lan=
 	:
 }
 
 [ "$script_dir" = "$install_dir" ] && _script="$i_script" || _script="$p_script"
-
-mode_syn="<whitelist|blacklist>"
-geomode_usage="$mode_syn : Geoip blocking mode: whitelist or blacklist."
-
-if_syn="<\"[ifaces]\"|auto|all>"
-ifaces_usage="$if_syn :
-${sp8}Changes which network interface(s) geoip firewall rules will be applied to.
-${sp8}'all' will apply geoip to all network interfaces.
-${sp8}'auto' will automatically detect WAN interfaces (this may cause problems if the machine has no direct WAN connection).
-${sp8}Generally, if the machine has dedicated WAN interfaces, specify them, otherwise pick 'all'."
-
-lan_syn="<\"[lan_ips]\"|auto|none>"
-lan_ips_usage="$lan_syn :
-${sp8}Specifies LAN ip's or subnets to exclude from geoip blocking (both ipv4 and ipv6).
-${sp8}Only compatible with whitelist mode.
-${sp8}Generally, in whitelist mode, if the machine has no dedicated WAN interfaces,
-${sp8}specify LAN ip's or subnets to avoid blocking them. Otherwise you probably don't need this.
-${sp8}'auto' will automatically detect LAN subnets during the initial setup and at every update of the ip lists.
-${sp8}'none' removes previously set LAN ip's and disables the automatic detection.
-${sp8}*Don't use 'auto' if the machine has a dedicated WAN interface*"
-
-tr_syn="<\"[trusted_ips]\"|none>"
-trusted_ips_usage="$tr_syn :
-${sp8}Specifies trusted ip's or subnets to exclude from geoip blocking (both ipv4 and ipv6).
-${sp8}This option is independent from the above LAN ip's option.
-${sp8}Works both in whitelist and blacklist mode.
-${sp8}'none' removes previously set trusted ip's"
-
-ports_syn="<[tcp|udp]:[allow|block]:[all|<ports>]>"
-ports_usage="$ports_syn :
-${sp8}For given protocol (tcp/udp), use 'block' to geoblock incoming traffic on specific ports or on all ports.
-${sp8}or use 'allow' to geoblock all incoming traffic except on specific ports.
-${sp8}To specify ports for both tcp and udp in one command, use the '-p' option twice."
-
-sch_syn="<\"[expression]\"|disable>"
-schedule_usage="$sch_syn :
-${sp8}Schedule expression for the periodic cron job implementing automatic update of the ip lists, must be inside double quotes.
-${sp8}Default schedule is \"15 4 * * *\" (at 4:15 [am] every day)
-${sp8}'disable' will disable automatic updates of the ip lists."
-
-user_ccode_syn="<[user_country_code]|none>"
-user_ccode_usage="$user_ccode_syn :
-${sp8}Specify user's country code. Used to prevent accidental lockout of a remote machine.
-${sp8}'none' disables this feature."
-
-fw_be_syn="<ipt|nft>"
-fw_be_usage="$fw_be_syn :
-${sp8}Specify firewall backend to use with $p_name. 'ipt' for iptables, 'nft' for nftables.
-${sp8}Default is nftables if present in the system."
-
-nft_p_syn="<memory|performance>"
-nft_perf_usage="$nft_p_syn :
-${sp8}Optimization policy for nftables sets.
-${sp8}By default optimizes for memory if the machine has less than 2GiB or RAM, otherwise for performance.
-${sp8}Doesn't work with iptables."
-
-nointeract_usage="Non-interactive setup. Will not ask any questions. Will fail if required options are not specified or invalid."
-
-nobackup_usage="<true|false> :
-${sp8}No backup. If set to 'true', $p_name will not create a backup of ip lists and firewall rules state after applying changes,
-${sp8}and will automatically re-fetch ip lists after each reboot.
-${sp8}Default is 'true' for OpenWrt, 'false' for all other systems."
-
-datadir_usage="<\"path\"> :
-${sp8}Set custom path to directory where backups and the status file will be stored.
-${sp8}Default is '/tmp/geoip-shell-data' for OpenWrt, '/var/lib/$p_name' for all other systems."
 
 :

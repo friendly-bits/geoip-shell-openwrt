@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.5.2
+curr_ver=0.6.7
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
@@ -23,21 +23,21 @@ set -- $_args; oldifs
 usage() {
 cat <<EOF
 
-Usage: $me -l <"list_ids"> -p <path> [-o <output_file>] [-s <status_file>] [-u <"source">] [-f] [-d] [-V] [-h]
+Usage: $me -l <"list_ids"> -p <path> [-o <output_file>] [-s <path>] [-u <"source">] [-f] [-d] [-V] [-h]
 
-1) Fetches ip lists for given country codes from RIPE API or from ipdeny
+1) Fetches ip lists for given country codes from RIPE API, or from ipdeny, or from MaxMind
 	(supports any combination of ipv4 and ipv6 lists)
 
 2) Parses, validates the downloaded lists, and saves each one to a separate file.
 
 Options:
-  -l $list_ids_usage
+  -l <"list_ids">  : $list_ids_usage
   -p <path>        : Path to directory where downloaded and compiled subnet lists will be stored.
   -o <output_file> : Path to output file where fetched list will be stored.
 ${sp16}${sp8}With this option, specify exactly 1 country code.
 ${sp16}${sp8}(use either '-p' or '-o' but not both)
-  -s <status_file> : Path to a status file to register fetch results in.
-  -u $sources_usage
+  -s <path>        : Path to a file to register fetch results in.
+  -u $srcs_syn : Use this ip list source for download. Supported sources: ripe, ipdeny, maxmind.
  
   -r : Raw mode (outputs newline-delimited lists rather than nftables-ready ones)
   -f : Force using fetched lists even if list timestamp didn't change compared to existing list
@@ -52,7 +52,7 @@ while getopts ":l:p:o:s:u:rfdVh" opt; do
 	case $opt in
 		l) lists_arg=$OPTARG ;;
 		p) iplist_dir_f=$OPTARG ;;
-		s) status_file=$OPTARG ;;
+		s) fetch_res_file=$OPTARG ;;
 		o) output_file=$OPTARG ;;
 		u) source_arg=$OPTARG ;;
 
@@ -72,17 +72,18 @@ extra_args "$@"
 
 
 date_raw_to_compat() {
-	[ -z "$1" ] && return 1
+	[ -z "$1" ] && { unset "$2"; return 1; }
 	mon_temp="${1#????}"
 	eval "$2=\"${1%????}-${mon_temp%??}-${1#??????}\""
 }
 
 reg_server_date() {
 	case "$1" in
-		[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] )
+		[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
 			set_a_arr_el server_dates_arr "$2=$1"
-			 ;;
-		*) 
+			;;
+		*)
+			:
 	esac
 }
 
@@ -100,17 +101,15 @@ get_src_dates_ipdeny() {
 			ipv4) server_url="$ipdeny_ipv4_url" ;;
 			ipv6) server_url="$ipdeny_ipv6_url"
 		esac
-		
 
 		server_html_file="${tmp_file_path}_dl_page_${family}.tmp"
 		server_plaintext_file="${tmp_file_path}_plaintext_${family}.tmp"
 		$fetch_cmd_q "${http}://$server_url" > "$server_html_file"
 
-		
 
-		[ -f "$server_html_file" ] && awk '{gsub("<[^>]*>", "")} {$1=$1};1' "$server_html_file" > "$server_plaintext_file" ||
+		[ -f "$server_html_file" ] && $awk_cmd '{gsub("<[^>]*>", "")} {$1=$1};1' "$server_html_file" > "$server_plaintext_file" ||
 			echolog "failed to fetch server dates from the IPDENY server."
-		rm "$server_html_file" 2>/dev/null
+		rm -f "$server_html_file"
 	done
 
 	for list_id in $valid_lists; do
@@ -118,51 +117,129 @@ get_src_dates_ipdeny() {
 		family="${list_id#*_}"
 		server_plaintext_file="${tmp_file_path}_plaintext_${family}.tmp"
 		[ -f "$server_plaintext_file" ] && server_date="$(
-			awk -v c="$curr_ccode" '($1==tolower(c)"-aggregated.zone" && $2 ~ /^[0-3][0-9]-...-20[1-9][0-9]$/) {split($2,d,"-");
-				$1 = sprintf("%04d%02d%02d", d[3],index("  JanFebMarAprMayJunJulAugSepOctNovDec",d[2])/3,d[1]); print $1}' \
+			$awk_cmd -v c="$curr_ccode" '($1==tolower(c)"-aggregated.zone" && $2 ~ /^[0-3][0-9]-...-20[1-9][0-9]$/) {split($2,d,"-");
+				date=sprintf("%04d%02d%02d", d[3],index("  JanFebMarAprMayJunJulAugSepOctNovDec",d[2])/3,d[1]); print date}' \
 				"$server_plaintext_file"
 		)"
 
-		reg_server_date "$server_date" "$list_id" "IPDENY"
+		reg_server_date "$server_date" "$list_id" IPDENY
 	done
 
-	for family in $families; do rm -f "${tmp_file_path}_plaintext_${family}.tmp" 2>/dev/null; done
+	for family in $families; do rm -f "${tmp_file_path}_plaintext_${family}.tmp"; done
 }
 
 get_src_dates_ripe() {
 	server_html_file="/tmp/geoip-shell_server_dl_page.tmp"
 
+	[ ! "$ripe_url_stats" ] && { echolog -err "get_src_dates_ripe(): \$ripe_url_stats variable should not be empty!"; return 1; }
+
 	for registry in $registries; do
 		tolower reg_lc "$registry"
 		server_url="$ripe_url_stats/$reg_lc"
 
-		
-		[ ! "$server_url" ] && { echolog -err "get_src_dates_ripe(): $server_url variable should not be empty!"; return 1; }
 
 		$fetch_cmd_q "${http}://$server_url" > "$server_html_file"
 
-		
 		server_date="$(grep -oE '\-[0-9]{8}\.md5' < "$server_html_file" | cut -b 2-9 | sort -V | tail -n1)"
 
-		rm "$server_html_file" 2>/dev/null
+		rm -f "$server_html_file"
 		get_a_arr_val fetch_lists_arr "$registry" list_ids
 		for list_id in $list_ids; do
-			reg_server_date "$server_date" "$list_id" "RIPE"
+			reg_server_date "$server_date" "$list_id" RIPE
 		done
 	done
 }
 
+get_src_dates_maxmind() {
+	[ ! "$maxmind_url" ] && { echolog -err "get_src_dates_maxmind(): \$maxmind_url variable should not be empty!"; return 1; }
+
+	case "$mm_license_type" in
+		free) mm_db_name=GeoLite2 ;;
+		paid) mm_db_name=GeoIP2 ;;
+		*) echolog -err "unexpected MaxMind license type '$mm_license_type'"; return 1
+	esac
+	server_url="https://${maxmind_url}/${mm_db_name}-Country-CSV/download?suffix=zip"
+
+
+	case "$fetch_cmd" in
+		curl*) fetch_cmd_date="$fetch_cmd_q --head" ;;
+		wget*) fetch_cmd_date="$fetch_cmd_q -S --method HEAD"
+	esac
+
+
+	server_date="$(
+		$fetch_cmd_date "$server_url" 2>&1 |
+		sed -n "/[Ll]ast-[Mm]odified:.*,/{
+			s/\r//g;
+			s/.*[Ll]ast-[Mm]odified${blank}*:${blank}*//;
+			s/^[A-Z][a-z][a-z],${blanks}//;
+			s/${blanks}GMT${blank}*//;
+			s/${blanks}[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$//;
+			p;q;}" |
+			awk '
+				BEGIN{rv=1}
+				$0 ~ /^[0-3][0-9] ... 20[1-9][0-9]$/ {
+					split($0,d," ");
+					date=sprintf("%04d%02d%02d",d[3],index("  JanFebMarAprMayJunJulAugSepOctNovDec",d[2])/3,d[1])
+					print date
+					rv=0
+					exit
+				}
+				END{exit rv}
+			'
+	)" || return 1
+
+	for list_id in $valid_lists; do
+		reg_server_date "$server_date" "$list_id" MAXMIND
+	done
+}
+
 parse_ripe_json() {
-	in_list="$1" out_list="$2" family="$3"
-	sed -n -e /"$family"/\{:1 -e n\;/]/q\;p\;b1 -e \} "$in_list" | cut -d\" -f2 > "$out_list"
-	[ -s "$out_list" ]; return $?
+	in_file="$1" out_file="$2" family_parse="$3"
+	sed -n -e /"$family_parse"/\{/]/q\;:1 -e n\;/]/q\;p\;b1 -e \} "$in_file" | cut -d\" -f2 > "$out_file" &&
+		[ -s "$out_file" ] &&
+			return 0
+	return 1
+}
+
+preparse_maxmind_csv() {
+	in_file="$1" out_file="$2" ccodes_parse="$3" family_parse="$4" mm_db_name_parse="$5"
+	mm_countries_tmp_file=/tmp/maxmind_countries.csv
+	san_str ccodes_parse_regex "$ccodes_parse" " " "|"
+
+	unzip -p "$in_file" "*/${mm_db_name_parse}-Country-Locations-en.csv" > "$mm_countries_tmp_file" || {
+		rm -f "$mm_countries_tmp_file"
+		return 1
+	}
+
+	unzip -p "$in_file"  "*/${mm_db_name_parse}-Country-Blocks-IPv${family_parse#ipv}.csv" |
+		$awk_cmd -F ',' "
+			NR==FNR { if (\$5~/^($ccodes_parse_regex)$/) {ccodes[\$1]=\$5}; next}
+			\$2 in ccodes {print ccodes[\$2], \$1}
+		" "$mm_countries_tmp_file" - | gzip > "$out_file" &&
+			[ -s "$out_file" ] && {
+				rm -f "$mm_countries_tmp_file"
+				return 0
+			}
+	rm -f "$mm_countries_tmp_file"
+	return 1
+}
+
+parse_maxmind_db() {
+	in_file="$1" out_file="$2" ccode_parse="$3" family_parse="$4"
+
+	gunzip -fc "$in_file" |
+		sed -n "/^$ccode_parse/{s/^$ccode_parse${blanks}//;p}" > "$out_file" &&
+		[ -s "$out_file" ] &&
+			return 0
+	return 1
 }
 
 group_lists_by_registry() {
 	valid_lists=
 	for registry in $all_registries; do
 		list_ids=
-		for list_id in $lists_arg; do
+		for list_id in $san_lists; do
 			ccode="${list_id%_*}"
 			get_a_arr_val registry_ccodes_arr "$registry" ccodes
 			case "$ccodes" in *" ${ccode} "*)
@@ -174,13 +251,15 @@ group_lists_by_registry() {
 		set_a_arr_el fetch_lists_arr "$registry=$list_ids"
 	done
 
-	subtract_a_from_b "$valid_lists" "$lists_arg" invalid_lists
+	subtract_a_from_b "$valid_lists" "$san_lists" invalid_lists
 	[ "$invalid_lists" ] && {
 		for invalid_list in $invalid_lists; do
 			add2list invalid_ccodes "${invalid_list%_*}"
 		done
 		die "Invalid country codes: '$invalid_ccodes'."
 	}
+	[ ! "$valid_lists" ] && die "No applicable ip list id's found in '$lists_arg'."
+	failed_lists="$valid_lists"
 }
 
 check_prev_list() {
@@ -189,7 +268,8 @@ check_prev_list() {
 
 	eval "prev_s_cnt=\"\$prev_ips_cnt_${list_id}\""
 	case "$prev_s_cnt" in
-		''|0)  prev_s_cnt='' ;;
+		''|0) prev_s_cnt=''
+			;;
 		*)
 			eval "prev_date_compat=\"\$prev_date_${list_id}\""
 			if [ "$prev_date_compat" ]; then
@@ -198,34 +278,30 @@ check_prev_list() {
 				mon_temp="${p#?????}"
 				prev_date_raw="${p%??????}${mon_temp%???}${p#????????}"
 			else
-				
 				prev_s_cnt=
 			fi
 	esac
 }
 
 check_updates() {
-	unset lists_need_update up_to_date_lists
-
 	time_now="$(date +%s)"
 
 	printf '\n%s\n' "Checking for ip list updates on the $dl_src_cap server..."
-	[ "$dl_src" = ipdeny ] && printf '%s\n' "Note: IPDENY server may be unresponsive at round hours."
-	echo
 
 	case "$dl_src" in
 		ipdeny) get_src_dates_ipdeny ;;
 		ripe) get_src_dates_ripe ;;
+		maxmind) get_src_dates_maxmind ;;
 		*) die "Unknown source: '$dl_src'."
 	esac
 
-	unset ccodes_need_update families
+	unset up_to_date_lists ccodes_need_update families no_date_lists
 	for list_id in $valid_lists; do
 		get_a_arr_val server_dates_arr "$list_id" date_src_raw
 		date_raw_to_compat "$date_src_raw" date_src_compat
 
 		if [ ! "$date_src_compat" ]; then
-			echolog -warn "$FAIL get the timestamp from the server for list '$list_id'. Will try to fetch anyway."
+			add2list no_date_lists "$list_id"
 			date_src_raw="$(date +%Y%m%d)"; force_update=1
 			date_raw_to_compat "$date_src_raw" date_src_compat
 		fi
@@ -236,7 +312,7 @@ check_updates() {
 
 		if [ "$time_diff" -gt 604800 ]; then
 			msg1="Newest ip list for list '$list_id' on the $dl_src_cap server is dated '$date_src_compat' which is more than 7 days old."
-			msg2="Either your clock is incorrect, or '$dl_src_cap' is not updating the list for '$list_id'."
+			msg2="Either your clock is incorrect, or $dl_src_cap is not updating the list for '$list_id'."
 			msg3="If it's the latter, please notify the developer."
 			echolog -warn "$msg1" "$msg2" "$msg3"
 		fi
@@ -251,141 +327,229 @@ check_updates() {
 		fi
 	done
 
+	[ "$no_date_lists" ] &&
+		echolog -warn "$FAIL get the timestamp from the server for ip lists: '$no_date_lists'. Will try to fetch anyway."
 	[ "$up_to_date_lists" ] &&
 		echolog "Ip lists '${purple}$up_to_date_lists${n_c}' are already ${green}up-to-date${n_c} with the $dl_src_cap server."
 	:
 }
 
 rm_tmp_f() {
-	rm -f "$fetched_list" "$parsed_list" "$valid_list" 2>/dev/null
+	rm -f "$fetched_file" "$parsed_list" "$valid_list"
+}
+
+rm_mm_tmp_f() {
+	set +f
+	rm -f "/tmp/${p_name}_fetched"*.tmp
+	rm -f "/tmp/${p_name}_preparsed"*.tmp
+	set -f
 }
 
 list_failed() {
 	rm_tmp_f
-	add2list failed_lists "$list_id"
 	[ "$1" ] && echolog -err "$1"
 }
 
-process_ccode() {
+fetch_file() {
+	[ $# = 3 ] || { echolog -err "fetch_file: invalid arguments."; return 1; }
 
-	curr_ccode="$1"; tolower curr_ccode_lc "$curr_ccode"
-	unset prev_list_reg list_path fetched_list
-	set +f; rm -f "/tmp/${p_name}_"*.tmp; set -f
+	$1 "$2" > "$3" || {
+		fetch_rv=$?
+		echolog -err "${fetch_cmd%% *} returned error code $fetch_rv for command:" "$1 \"$2\""
+		return 1
+	}
+	[ -s "$3" ] || return 1
+
+	printf '%s\n' "Fetch successful."
+	:
+}
+
+fetch_maxmind() {
+	fetched_db_mm="/tmp/${p_name}_fetched-db.tmp"
+	case "$mm_license_type" in
+		free) mm_db_name=GeoLite2 ;;
+		paid) mm_db_name=GeoIP2 ;;
+		*) echolog -err "unexpected MaxMind license type '$mm_license_type'"; return 1
+	esac
+	dl_url="${maxmind_url}/${mm_db_name}-Country-CSV/download?suffix=zip"
+
+	printf '%s\n' "Fetching the database from MaxMind..."
+
+	fetch_file "$fetch_cmd" "${http}://$dl_url" "$fetched_db_mm" || { 
+		list_failed "$FAIL fetch the database from Maxmind"
+		rm -f "$fetched_db_mm"
+		return 1
+	}
+
+	printf '\n%s' "Pre-parsing the database... "
+	for family in $families; do
+		preparsed_db_mm="/tmp/${p_name}_preparsed-${family}.gz.tmp"
+		preparse_maxmind_csv "$fetched_db_mm" "$preparsed_db_mm" "$ccodes_need_update" "$family" "$mm_db_name" || {
+			FAIL
+			rm_mm_tmp_f
+			echolog -err "$FAIL pre-parse the database from MaxMind."
+			return 1
+		}
+	done
+	OK
+	rm -f "$fetched_db_mm"
+
+	for family in $families; do
+		preparsed_db_mm="/tmp/${p_name}_preparsed-${family}.gz.tmp"
+		for ccode in $ccodes_need_update; do
+			list_id="${ccode}_${family}"
+			case "$exclude_iplists" in *"$list_id"*) continue; esac
+			parsed_list_mm="/tmp/${p_name}_fetched-${list_id}.tmp"
+			printf %s "Parsing the ip list for '${purple}$list_id${n_c}'... "
+
+			parse_maxmind_db "$preparsed_db_mm" "$parsed_list_mm" "$ccode" "$family" || {
+				rm_mm_tmp_f
+				echolog -err "$FAIL parse the ip list for '$list_id'."
+				return 1
+			}
+			OK
+		done
+		rm -f "$preparsed_db_mm"
+	done
+	echo
+
+	:
+}
+
+process_ccode() {
+	curr_ccode="$1"
+	tolower curr_ccode_lc "$curr_ccode"
+	unset list_path fetched_file
 
 	for family in $families; do
 		list_id="${curr_ccode}_${family}"
+		case "$exclude_iplists" in *"$list_id"*) continue; esac
+
+		rm_fetched_list_id=
 		case "$dl_src" in
-			ripe ) dl_url="${ripe_url_api}v4_format=prefix&resource=${curr_ccode}" ;;
-			ipdeny )
+			ripe)
+				fetched_file="/tmp/${p_name}_fetched-$curr_ccode.tmp"
+				dl_url="${ripe_url_api}v4_format=prefix&resource=${curr_ccode}" ;;
+			maxmind)
+				fetched_file="/tmp/${p_name}_fetched-$list_id.tmp"
+				rm_fetched_list_id=1
+				dl_url="" ;;
+			ipdeny)
+				fetched_file="/tmp/${p_name}_fetched-$list_id.tmp"
+				rm_fetched_list_id=1
 				case "$family" in
-					"ipv4" ) dl_url="${ipdeny_ipv4_url}/${curr_ccode_lc}-aggregated.zone" ;;
-					* ) dl_url="${ipdeny_ipv6_url}/${curr_ccode_lc}-aggregated.zone"
+					ipv4) dl_url="${ipdeny_ipv4_url}/${curr_ccode_lc}-aggregated.zone" ;;
+					*) dl_url="${ipdeny_ipv6_url}/${curr_ccode_lc}-aggregated.zone"
 				esac ;;
-			* ) die "Unsupported source: '$dl_src'."
+			*) die "Unsupported source: '$dl_src'."
 		esac
 
 		list_path="${output_file:-$iplist_dir_f/$list_id.iplist}"
 
 		parsed_list="/tmp/${p_name}_parsed-${list_id}.tmp"
-		fetched_list="/tmp/${p_name}_fetched-$curr_ccode.tmp"
 
 		valid_s_cnt=0
 		failed_s_cnt=0
 
-		check_prev_list "$list_id"
-
-		if [ ! -s "$fetched_list" ]; then
+		if [ ! -s "$fetched_file" ]; then
 			case "$dl_src" in
-				ripe ) printf '%s\n' "Fetching ip list for country '${purple}$curr_ccode${n_c}' from $dl_src_cap..." ;;
-				ipdeny ) printf '%s\n' "Fetching ip list for '${purple}$list_id${n_c}' from $dl_src_cap..."
+				ripe) fetch_subj="ip list for country '${purple}$curr_ccode${n_c}'" ;;
+				maxmind) list_failed "Fetched file '$fetched_file' for list id '$list_id' not found"; return 1 ;;
+				ipdeny) fetch_subj="ip list for '${purple}$list_id${n_c}'"
 			esac
+			printf '\n%s\n' "Fetching the $fetch_subj from $dl_src_cap..."
 
-			
-			$fetch_cmd "${http}://$dl_url" > "$fetched_list" ||
-				{ list_failed "$FAIL fetch the ip list for '$list_id' from the $dl_src_cap server."; continue; }
-			printf '%s\n\n' "Fetch successful."
+			fetch_file "$fetch_cmd" "${http}://$dl_url" "$fetched_file" || {
+				list_failed "$FAIL fetch the $fetch_subj from $dl_src_cap."
+				return 1
+			}
 		fi
+
+		[ -s "$fetched_file" ] || { list_failed "$FAIL fetch the $fetch_subj from $dl_src_cap."; continue; }
 
 		case "$dl_src" in
 			ripe)
-				printf %s "Parsing ip list for '${purple}$list_id${n_c}'... "
-				parse_ripe_json "$fetched_list" "$parsed_list" "$family" ||
+				printf %s "Parsing the ip list for '${purple}$list_id${n_c}'... "
+				parse_ripe_json "$fetched_file" "$parsed_list" "$family" ||
 					{ list_failed "$FAIL parse the ip list for '$list_id'."; continue; }
 				OK ;;
-			ipdeny) mv "$fetched_list" "$parsed_list"
+			maxmind|ipdeny) mv "$fetched_file" "$parsed_list"
 		esac
 
 		printf %s "Validating '$purple$list_id$n_c'... "
-		validate_list "$list_id"
-		rm -f "$parsed_list" 2>/dev/null
+		valid_list="/tmp/validated-${list_id}.tmp"
 
-		[ "$failed_s_cnt" = 0 ] && OK || { FAIL; continue; }
+		case "$family" in
+			ipv4) subnet_regex="$subnet_regex_ipv4" ;;
+			*) subnet_regex="$subnet_regex_ipv6"
+		esac
+		grep -E "^$subnet_regex$" "$parsed_list" > "$valid_list"
 
-		printf '%s\n\n' "Validated subnets for '$purple$list_id$n_c': $valid_s_cnt."
+		parsed_s_cnt=$(wc -w < "$parsed_list")
+		valid_s_cnt=$(wc -w < "$valid_list")
+		failed_s_cnt=$(( parsed_s_cnt - valid_s_cnt ))
+
+		if [ "$failed_s_cnt" != 0 ]; then
+			failed_s="$(grep -Ev  "$subnet_regex" "$parsed_list")"
+
+			list_failed "${_nl}out of $parsed_s_cnt subnets for ip list '${purple}$list_id${n_c}, $failed_s_cnt subnets ${red}failed validation${n_c}'."
+			if [ $failed_s_cnt -gt 10 ]; then
+					echo "First 10 failed subnets:"
+					printf '%s\n' "$failed_s" | head -n10
+					printf '\n'
+			else
+				printf '%s\n%s\n\n' "Following subnets failed validation:" "$failed_s"
+			fi
+			rm -f "$parsed_list"
+			continue
+		else
+			rm -f "$parsed_list"
+			OK
+		fi
+
+		printf '%s\n' "Validated subnets for '$purple$list_id$n_c': $valid_s_cnt."
 		check_subnets_cnt_drop "$list_id" || { list_failed; continue; }
 
-		
-		{ [ "$raw_mode" ] && cat "$valid_list" || {
-				printf %s "elements={ "
-				tr '\n' ',' < "$valid_list"
-				printf '%s\n' "}"
-			}
-		} > "$list_path" || { list_failed "$FAIL overwrite the file '$list_path'"; continue; }
+		if [ "$raw_mode" ]; then
+			cat "$valid_list"
+		else
+			printf %s "elements={ "
+			tr '\n' ',' < "$valid_list"
+			printf '%s\n' "}"
+		fi > "$list_path" || { list_failed "$FAIL write to file '$list_path'"; continue; }
 
 		touch -d "$date_src_compat" "$list_path"
 		add2list fetched_lists "$list_id"
 		set_a_arr_el subnets_cnt_arr "$list_id=$valid_s_cnt"
 		set_a_arr_el list_date_arr "$list_id=$date_src_compat"
 
-		rm -f "$valid_list" 2>/dev/null
+		rm -f "$valid_list"
+		[ "$rm_fetched_list_id" ] && rm -f "$fetched_file"
 	done
 
-	rm -f "$fetched_list" 2>/dev/null
+	rm -f "$fetched_file"
 	:
-}
-
-validate_list() {
-	list_id="$1"
-	valid_list="/tmp/validated-${list_id}.tmp"
-	family="${list_id#*_}"
-
-	case "$family" in ipv4) subnet_regex="$subnet_regex_ipv4" ;; *) subnet_regex="$subnet_regex_ipv6"; esac
-	grep -E "^$subnet_regex$" "$parsed_list" > "$valid_list"
-
-	parsed_s_cnt=$(wc -w < "$parsed_list")
-	valid_s_cnt=$(wc -w < "$valid_list")
-	failed_s_cnt=$(( parsed_s_cnt - valid_s_cnt ))
-
-	if [ "$failed_s_cnt" != 0 ]; then
-		failed_s="$(grep -Ev  "$subnet_regex" "$parsed_list")"
-
-		list_failed "${_nl}NOTE: out of $parsed_s_cnt subnets for ip list '${purple}$list_id${n_c}, $failed_s_cnt subnets ${red}failed validation${n_c}'."
-		if [ $failed_s_cnt -gt 10 ]; then
-				echo "First 10 failed subnets:"
-				printf '%s\n' "$failed_s" | head -n10
-				printf '\n'
-		else
-			printf '%s\n%s\n\n' "Following subnets failed validation:" "$failed_s"
-		fi
-	fi
 }
 
 check_subnets_cnt_drop() {
 	list_id="$1"
+
 	if [ "$valid_s_cnt" = 0 ]; then
-		echolog -err "$WARN validated 0 subnets for list '$purple$list_id$n_c'. Perhaps the country code is incorrect?" >&2
+		echolog -warn "validated 0 subnets for list '$purple$list_id$n_c'. Perhaps the country code is incorrect?${_nl}"
 		return 1
 	fi
 
-	if [ "$prev_list_reg" ]; then
+	check_prev_list "$list_id"
+	if [ "$prev_s_cnt" ] && [ "$prev_s_cnt" != 0 ]; then
 		s_percents="$((valid_s_cnt * 100 / prev_s_cnt))"
-		case $((s_percents < 90)) in
-			1) echolog -err "$WARN validated subnets count '$valid_s_cnt' in the fetched list '$purple$list_id$n_c'" \
-				"is ${s_percents}% of '$prev_s_cnt' subnets in the existing list dated '$prev_date_compat'." \
-				"Not updating the list."
-				return 1 ;;
-			*) 
-		esac
+		if [ $s_percents -lt 60 ]; then
+			echolog -warn "validated subnets count '$valid_s_cnt' in the fetched list '$purple$list_id$n_c'" \
+			"is ${s_percents}% of '$prev_s_cnt' subnets in the existing list dated '$prev_date_compat'." \
+			"Not updating the list."
+			return 1
+		else
+			:
+		fi
 	fi
 }
 
@@ -393,7 +557,6 @@ check_subnets_cnt_drop() {
 	die "Specify iplist directory with '-p <path-to-dir>' or output file with '-o <output_file>'."
 [ "$iplist_dir_f" ] && [ "$output_file" ] && die "Use either '-p <path-to-dir>' or '-o <output_file>' but not both."
 
-[ ! "$lists_arg" ] && die "Specify list id's!"
 fast_el_cnt "$lists_arg" " " lists_arg_cnt
 
 [ "$output_file" ] && [ "$lists_arg_cnt" -gt 1 ] &&
@@ -403,149 +566,187 @@ fast_el_cnt "$lists_arg" " " lists_arg_cnt
 iplist_dir_f="${iplist_dir_f%/}"
 
 all_registries="ARIN RIPENCC APNIC AFRINIC LACNIC"
-
-newifs "$_nl" cca
-cca2_f="cca2.list"
+cca2_f=cca2.list
 for cca2_path in "$script_dir/$cca2_f" "$conf_dir/$cca2_f"; do
 	[ -f "$cca2_path" ] && break
 done
 
 [ -f "$cca2_path" ] && cca2_list="$(cat "$cca2_path")" || die "$FAIL load the cca2 list."
+newifs "$_nl" cca
 set -- $cca2_list
+oldifs cca
 for i in 1 2 3 4 5; do
 	eval "c=\"\${$i}\""
 	set_a_arr_el registry_ccodes_arr "$c"
 done
-oldifs cca
 
-ucl_f_cmd="uclient-fetch -T 16"
-curl_cmd="curl -L --retry 5 -f --fail-early --connect-timeout 7"
+default_source=ripe
+is_alphanum "$source_arg" && tolower source_arg && subtract_a_from_b "$valid_sources" "$source_arg" ||
+	die "Invalid source: '$source_arg'"
+dl_src="${source_arg:-"$default_source"}"
+checkvars dl_src
+toupper dl_src_cap "$dl_src"
+
+ucl_cmd=uclient-fetch
+curl_cmd="curl -f"
+wget_cmd="wget -q"
 
 [ "$script_dir" = "$install_dir" ] && [ "$root_ok" ] && getconfig http
-unset secure_util fetch_cmd
+unset fetch_cmd ssl_ok
+
+if [ -s /etc/ssl/certs/ca-certificates.crt ]; then
+	case "$initsys" in
+		procd|busybox)
+			if [ -s /etc/ssl/cert.pem ] && {
+				[ -s /usr/bin/ssl_client ] ||
+				{ [ -s /usr/lib/libustream-ssl.so ] || [ -s /lib/libustream-ssl.so ] && checkutil uci; }
+			}
+			then
+				ssl_ok=1
+			fi ;;
+		*) ssl_ok=1
+	esac
+fi
+
 for util in curl wget uclient-fetch; do
 	checkutil "$util" || continue
+	maxmind_str=
 	case "$util" in
 		curl)
-			secure_util="curl"
-			fetch_cmd="$curl_cmd --progress-bar"
-			fetch_cmd_q="$curl_cmd -s"
+			curl --help curl 2>/dev/null | grep '\--fail-early' 1>/dev/null && curl_cmd="$curl_cmd --fail-early"
+			[ "$dl_src" = maxmind ] && maxmind_str=" -u $mm_acc_id:$mm_license_key"
+			con_check_cmd="$curl_cmd --retry 2 --connect-timeout 7 -s -S --head"
+			fetch_cmd="$curl_cmd$maxmind_str -L -f --retry 3 --connect-timeout 16"
+			fetch_cmd_q="$fetch_cmd -s -S"
+			fetch_cmd="$fetch_cmd --progress-bar"
 			break ;;
 		wget)
-			if checkutil ubus && checkutil uci; then
-				wget_cmd="wget -q --timeout=16"
-				[ -s "/usr/lib/libustream-ssl.so" ] && { secure_util="wget"; break; }
+			if ! wget --version 2>/dev/null | grep -m1 "GNU Wget"; then
+				unset wget_tries wget_tries_con_check wget_show_progress wget_max_redirect
+				[ "$dl_src" = maxmind ] &&
+					die "Can not fetch from MaxMind with this version of wget. Please install curl or GNU wget."
 			else
-				wget_cmd="wget -q --max-redirect=10 --tries=5 --timeout=16"
-				secure_util="wget"
-				fetch_cmd="$wget_cmd --show-progress -O -"
-				fetch_cmd_q="$wget_cmd -O -"
-				break
-			fi ;;
+				wget_show_progress=" --show-progress"
+				wget_max_redirect=" --max-redirect=10"
+				wget_tries=" --tries=3"
+				wget_tries_con_check=" --tries=2"
+			fi 1>/dev/null
+
+			[ "$dl_src" = maxmind ] && maxmind_str=" --user=$mm_acc_id --password=$mm_license_key"
+			wget_cmd="$wget_cmd$wget_max_redirect"
+			con_check_cmd="$wget_cmd$wget_tries_con_check --timeout=7 --spider -U Mozilla"
+			fetch_cmd="$wget_cmd$wget_tries$maxmind_str --timeout=16"
+			fetch_cmd_q="$fetch_cmd -O -"
+			fetch_cmd="$fetch_cmd$wget_show_progress -O -"
+			break ;;
 		uclient-fetch)
-			[ -s "/usr/lib/libustream-ssl.so" ] && secure_util="uclient-fetch"
-			fetch_cmd="$ucl_f_cmd -O -"
-			fetch_cmd_q="$ucl_f_cmd -q -O -"
+			[ "$dl_src" = maxmind ] &&
+				die "Can not fetch from MaxMind with uclient-fetch. Please install curl or GNU wget."
+			con_check_cmd="$ucl_cmd -T 7 -q -s"
+			fetch_cmd_q="$ucl_cmd -T 16 -q -O -"
+			fetch_cmd="$ucl_cmd -T 16 -O -"
+			break
 	esac
 done
 
 [ "$daemon_mode" ] && fetch_cmd="$fetch_cmd_q"
 
-[ -z "$fetch_cmd" ] && die "Compatible download utilites unavailable."
+[ -z "$fetch_cmd" ] && die "Compatible download utilites (curl/wget/uclient-fetch) unavailable."
 
-if [ -z "$secure_util" ] && [ -z "$http" ]; then
-	if [ "$nointeract" ]; then
-		REPLY=y
-	else
-		[ ! "$manmode" ] && die "no fetch utility with SSL support available."
-		printf '\n%s\n' "Can not find download utility with SSL support. Enable insecure downloads?"
-		pick_opt "y|n"
-	fi
-	case "$REPLY" in
-		n|N) die "No fetch utility available." ;;
-		y|Y) http="http"; [ "$script_dir" = "$install_dir" ] && setconfig http
+if [ -z "$ssl_ok" ]; then
+	case "$dl_src" in ipdeny|maxmind)
+		echolog -err "SSL support is required to use the ${dl_src_cap} source but no utility with SSL support is available."
+		checkutil uci && echolog "Please install the package 'ca-bundle' and one of the packages: libustream-mbedtls, libustream-openssl, libustream-wolfssl."
+		die
 	esac
+
+	if [ -z "$http" ]; then
+		if [ "$nointeract" ]; then
+			REPLY=y
+		else
+			[ ! "$manmode" ] && die "no fetch utility with SSL support available."
+			printf '\n%s\n' "Can not find download utility with SSL support. Enable insecure downloads?"
+			pick_opt "y|n"
+		fi
+		case "$REPLY" in
+			n) die "No fetch utility available." ;;
+			y) http=http; [ "$script_dir" = "$install_dir" ] && setconfig http
+		esac
+	fi
 fi
 : "${http:=https}"
 
-valid_sources="ripe ipdeny"
-default_source="ripe"
 
-lists=
+unset lists exclude_iplists excl_list_ids failed_lists fetched_lists
+[ -s "$excl_file" ] && nodie=1 getconfig exclude_iplists exclude_iplists "$excl_file"
+
 for list_id in $lists_arg; do
 	case "$list_id" in
-		*_*) toupper cc_up "${list_id%%_*}"; tolower fml_lo "_${list_id#*_}"; add2list lists "$cc_up$fml_lo" ;;
+		*_*) toupper cc_up "${list_id%%_*}"; tolower fml_lo "_${list_id#*_}" ;;
 		*) die "invalid list id '$list_id'."
 	esac
+	list_id="$cc_up$fml_lo"
+	case "$exclude_iplists" in *"$list_id"*)
+		add2list excl_list_ids "$list_id"
+		continue
+	esac
+	add2list lists "$list_id"
 done
-lists_arg="$lists"
+san_lists="$lists"
 
-tolower source_arg
-dl_src="${source_arg:-"$default_source"}"
-toupper dl_src_cap "$dl_src"
-
-checkvars dl_src
-
-set -- $dl_src
-[ "$2" ] && die "Specify only one download source."
-
-subtract_a_from_b "$valid_sources" "$dl_src" invalid_source
-case "$invalid_source" in *?*) die "Invalid source: '$invalid_source'"; esac
-
-case "$dl_src" in
-	ripe) dl_srv="${ripe_url_api%%/*}" ;;
-	ipdeny) dl_srv="${ipdeny_ipv4_url%%/*}"
-esac
-
-printf '\n%s' "Checking connectivity... "
-nslookup="nslookup -retry=1"
-{
-	eval "$nslookup" 127.0.0.1 || eval "$nslookup" ::1 || nslookup=nslookup
-	for ns in "8.8.8.8" "208.68.222.222" "2001:4860:4860::8888" "2620:119:35::35"; do
-		eval "$nslookup" "$dl_srv" "$ns" && break
-	done
-} 1>/dev/null 2>/dev/null || die "Machine appears to have no Internet connectivity or $dl_src_cap server is currently down."
-OK
-
-for f in "$status_file" "$output_file"; do
-	[ "$f" ] && [ ! -f "$f" ] && { touch "$f" || die "$FAIL create file '$f'."; }
-done
+[ "$excl_list_ids" ] && report_excluded_lists "$excl_list_ids"
 
 group_lists_by_registry
 
-[ ! "$registries" ] && die "$FAIL determine relevant regions."
+[ "$registries" ] || die "$FAIL determine relevant regions."
 
-for list_id in $valid_lists; do
-	unset "prev_ips_cnt_${list_id}"
+case "$dl_src" in
+	ripe) con_check_url="${ripe_url_api}v4_format=prefix&resource=nl" ;;
+	ipdeny) con_check_url="$ipdeny_ipv4_url" ;;
+	maxmind) con_check_url="${maxmind_url%%/*}"
+esac
+[ "$dl_src" = ipdeny ] && printf '\n%s' "Note: IPDENY server may be unresponsive at round hours."
+
+printf '\n%s' "Checking connectivity... "
+$con_check_cmd "${http}://$con_check_url" 1>/dev/null 2>/dev/null || {
+	rv=$?
+	echolog -err "${_nl}${con_check_cmd%% *} returned error code $rv for command:" "$con_check_cmd \"${http}://$con_check_url\""
+	die "Connection attempt to the $dl_src_cap server failed."
+}
+OK
+
+for f in "$status_file" "$fetch_res_file" "$output_file"; do
+	[ "$f" ] && [ ! -f "$f" ] && { touch "$f" || die "$FAIL create file '$f'."; }
 done
 
 if [ "$status_file" ] && [ -s "$status_file" ]; then
 	getstatus "$status_file"
 else
-	
 	:
 fi
-unset failed_lists fetched_lists
 
-trap 'rm_tmp_f; rm -f "$server_html_file" 2>/dev/null
-	for family in $families; do
-		rm -f "${tmp_file_path}_plaintext_${family}.tmp" "${tmp_file_path}_dl_page_${family}.tmp" 2>/dev/null
-	done; exit' INT TERM HUP QUIT
+trap 'rm_tmp_f;	rm_mm_tmp_f; \
+	set +f;	rm -f "$server_html_file" "/tmp/${p_name}_ipdeny_plaintext_"*.tmp "/tmp/${p_name}_ipdeny_dl_page_"*.tmp; set -f; \
+	trap - INT TERM HUP QUIT; exit' INT TERM HUP QUIT
 
 check_updates
+
+set +f; rm -f "/tmp/${p_name}_"*.tmp; set -f
+if [ "$dl_src" = maxmind ] && [ "$ccodes_need_update" ]; then
+	fetch_maxmind || die
+fi
 
 for ccode in $ccodes_need_update; do
 	process_ccode "$ccode"
 done
 
-if [ "$status_file" ]; then
-	ips_cnt_str=
-	get_a_arr_keys subnets_cnt_arr list_ids
-	for list_id in $list_ids; do
-		get_a_arr_val subnets_cnt_arr "$list_id" subnets_cnt
-		ips_cnt_str="${ips_cnt_str}prev_ips_cnt_${list_id}=$subnets_cnt$_nl"
-	done
+if [ "$fetch_res_file" ]; then
+	subtract_a_from_b "$fetched_lists $up_to_date_lists" "$failed_lists" failed_lists
+	setstatus "$fetch_res_file" "fetched_lists=$fetched_lists" "up_to_date_lists=$up_to_date_lists" \
+		"failed_lists=$failed_lists" || die "$FAIL write to file '$fetch_res_file'."
+fi
 
+if [ "$status_file" ]; then
 	list_dates_str=
 	get_a_arr_keys list_date_arr list_ids
 	for list_id in $list_ids; do
@@ -553,9 +754,20 @@ if [ "$status_file" ]; then
 		list_dates_str="${list_dates_str}prev_date_${list_id}=$prev_date$_nl"
 	done
 
-	setstatus "$status_file" "fetched_lists=$fetched_lists" "up_to_date_lists=$up_to_date_lists" \
-		"failed_lists=$failed_lists" "$ips_cnt_str" "$list_dates_str" ||
-			die "$FAIL write to the status file '$status_file'."
+	ips_cnt_str=
+	get_a_arr_keys subnets_cnt_arr list_ids
+	for list_id in $list_ids; do
+		get_a_arr_val subnets_cnt_arr "$list_id" subnets_cnt
+		ips_cnt_str="${ips_cnt_str}prev_ips_cnt_${list_id}=$subnets_cnt$_nl"
+	done
+
+	[ "$ips_cnt_str" ] || [ "$list_dates_str" ] && {
+		setstatus "$status_file" "$list_dates_str" "$ips_cnt_str" || die "$FAIL write to file '$status_file'."
+		[ "$root_ok" ] && [ "$datadir" ] &&
+			case "$status_file" in "$datadir"*)
+				chmod 600 "$status_file" && chown -R root:root "$status_file"
+			esac
+	}
 fi
 
 :
