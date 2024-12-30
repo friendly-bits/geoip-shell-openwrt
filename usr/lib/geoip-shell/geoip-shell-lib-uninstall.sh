@@ -1,6 +1,6 @@
 #!/bin/sh
 
-curr_ver=0.6.7
+curr_ver=0.6.8
 
 # Copyright: antonk (antonk.d3v@gmail.com)
 # github.com/friendly-bits
